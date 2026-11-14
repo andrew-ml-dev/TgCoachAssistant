@@ -400,6 +400,11 @@ async def set_day_state(day: str | None = None, **f) -> None:
     await _exec(f"UPDATE day_state SET {sets} WHERE date = ?", *f.values(), day)
 
 
+async def was_sent(flag: str, day: str | None = None) -> bool:
+    st = await day_state(day)
+    return flag in st["sent"].split(",")
+
+
 async def mark_sent(flag: str, day: str | None = None) -> bool:
     """Ставит флаг разовой рассылки; False, если уже стоял."""
     st = await day_state(day)

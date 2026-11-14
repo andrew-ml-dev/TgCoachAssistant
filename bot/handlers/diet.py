@@ -111,6 +111,7 @@ async def send_menu(bot: Bot, chat_id: int, profile, regenerate: bool = False) -
         await bot.send_chat_action(chat_id, "typing")
         data = await generate(profile)
     await bot.send_message(chat_id, menu_text(data), reply_markup=menu_kb(data, day))
+    await db.mark_sent("menu", day)  # меню за сегодня показано — утренняя рассылка не нужна
 
 
 async def _show(message: Message, profile, regenerate: bool = False) -> None:

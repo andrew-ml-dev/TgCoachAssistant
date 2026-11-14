@@ -583,3 +583,35 @@ def test_all_chart_after_profile_redo(h):
         text, png = await report_view.build(await db.get_profile(), 0)
         assert "Старт 92" in text and png
     run(h, go)
+
+
+
+def test_evening_retries_after_failure(h):
+    async def go():
+        await onboard(h)
+        from aiogram.exceptions import TelegramNetworkError
+        from aiogram.methods import SendMessage
+        p = await db.get_profile()
+        real = h.session.make_request
+        async def failing(bot, method, timeout=None):
+            if isinstance(method, SendMessage) and "Итог дня" in method.text:
+                raise TelegramNetworkError(method=method, message="network down")
+            return await real(bot, method, timeout)
+        h.session.make_request = failing
+        with pytest.raises(TelegramNetworkError):
+            await reminders.evening(h.bot, p)
+        assert not await db.was_sent("evening")                   # отметки нет — будет повтор
+        h.session.make_request = real
+        h.session.calls.clear()
+        await reminders.evening(h.bot, p)
+        assert "Итог дня" in h.out() and await db.was_sent("evening")
+        h.session.calls.clear()
+        await reminders.evening(h.bot, p)
+        assert h.out() == ""                                       # второй раз не шлём
+
+        # меню, открытое вручную через /menu, утром повторно не приходит
+        await h.say("/menu")
+        h.session.calls.clear()
+        await reminders.morning_menu(h.bot, p, db.now().replace(hour=12, minute=30))
+        assert h.out() == ""
+    run(h, go)

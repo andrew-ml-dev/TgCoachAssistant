@@ -57,22 +57,23 @@ async def morning_menu(bot: Bot, profile, now: datetime) -> None:
     """Меню приходит после взвешивания; если вес пропущен или не внесён до отсечки — после неё."""
     if not profile["menu_enabled"] or now < _at(now, profile["wake_time"]) or now.hour >= 15:
         return
-    if await db.get_menu(db.today()):
+    if await db.was_sent("menu"):
         return
     st = await db.day_state()
     weighed = await db.weight_on(db.today())
     if not (weighed or st["weight_skipped"] or now > _cutoff(profile, now)):
         return
-    if not await db.mark_sent("menu"):
-        return
     try:
+        # send_menu сам ставит отметку после отправки; уже составленное меню при повторе не стоит денег
         await diet.send_menu(bot, profile["chat_id"], profile)
     except llm.LLMError as e:
+        await db.mark_sent("menu")  # не платим за повторные попытки каждую минуту
         log.warning("Утреннее меню не составлено: %s", e)
 
 
 async def evening(bot: Bot, profile) -> None:
-    if not await db.mark_sent("evening"):
+    """Отметка ставится только после успешной отправки: при сбое итог придёт со следующей попытки."""
+    if await db.was_sent("evening"):
         return
     tot = await db.day_totals(db.today())
     text = "🌙 <b>Итог дня</b>\n" + await budget.today_text(profile)
@@ -81,6 +82,7 @@ async def evening(bot: Bot, profile) -> None:
     text += ("\n\n<b>Всё за день записано?</b> Если что-то забыли — допишите и нажмите «✅ Всё записал». "
              "Неполные дни я не учитываю в расчёте расхода и прогнозе веса.")
     await bot.send_message(profile["chat_id"], text, reply_markup=kb.day_done(db.today()))
+    await db.mark_sent("evening")
 
 
 async def tick(bot: Bot) -> None:
@@ -94,10 +96,12 @@ async def tick(bot: Bot) -> None:
     await morning_menu(bot, profile, now)
     if "21:00" <= hm < "22:30":
         await evening(bot, profile)
-    if now.weekday() == 6 and "10:00" <= hm < "12:00" and await db.mark_sent("weekly"):
+    if now.weekday() == 6 and "10:00" <= hm < "12:00" and not await db.was_sent("weekly"):
         await common.send_weekly(bot, profile["chat_id"], profile, with_review=True)
-    if "03:00" <= hm < "04:00" and await db.mark_sent("backup"):
+        await db.mark_sent("weekly")
+    if "03:00" <= hm < "04:00" and not await db.was_sent("backup"):
         await db.backup()
+        await db.mark_sent("backup")
 
 
 async def run(bot: Bot) -> None:
