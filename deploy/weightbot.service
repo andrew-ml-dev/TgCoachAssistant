@@ -1,0 +1,13 @@
+[Unit]
+Description=Weight loss Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/weightbot
+ExecStart=%h/weightbot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
