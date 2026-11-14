@@ -41,6 +41,29 @@ HELP = (
 )
 
 
+# ---------- кнопки постоянной панели ----------
+# Живут здесь, потому что menu.router идёт раньше роутеров с состояниями (диета, настройки, еда):
+# нажатие кнопки панели всегда отменяет незавершённый вопрос, а не становится ответом на него.
+
+@router.message(F.text.in_({kb.QUICK} | kb.OLD_QUICK))
+async def panel_quick(message: Message, state: FSMContext) -> None:
+    from .diet import products_msg
+    await products_msg(message, state)
+
+
+@router.message(F.text == kb.MENU)
+async def panel_menu(message: Message, state: FSMContext, profile) -> None:
+    from .diet import menu_cmd
+    await menu_cmd(message, state, profile)
+
+
+@router.message(F.text == kb.CAN)
+async def panel_can(message: Message, state: FSMContext, profile) -> None:
+    from .food import can_start_msg
+    await state.clear()
+    await can_start_msg(message, state, profile)
+
+
 @router.message(F.text.in_({kb.TODAY, kb.OLD_TODAY}))
 @router.message(Command("today"))
 async def today(message: Message, state: FSMContext, profile) -> None:
@@ -163,10 +186,12 @@ async def can(message: Message, command: CommandObject, state: FSMContext, profi
 
 @router.message(Command("undo"))
 async def undo(message: Message, profile) -> None:
-    meal = await db.last_meal()
-    if not meal or meal["date"] != db.today():
+    from .food import _delete
+    meals = await db.meals_on(db.today())
+    if not meals:
         return await message.answer("Сегодня нет записей еды для отмены.")
-    await db.delete_meal(meal["id"])
+    meal = max(meals, key=lambda m: m["id"])
+    await _delete(meal["id"])
     await message.answer(f"Удалил: {escape(meal['title'])} — {fmt(meal['kcal'])} ккал.\n\n" + await budget.left_line(profile))
 
 

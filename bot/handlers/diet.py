@@ -1,5 +1,6 @@
 """Меню на день: утренняя рассылка, /menu, отметка съеденного, настройки диеты и протеина."""
 import re
+import secrets
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -73,6 +74,7 @@ async def generate(profile) -> dict:
     if not parsed.meals:
         raise llm.LLMError("Не получилось составить меню, попробуйте ещё раз.")
     data = {"meals": [m.model_dump() for m in parsed.meals], "tip": parsed.tip, "eaten": [],
+            "v": secrets.token_hex(2),  # версия меню: кнопки старых сообщений после «заново» не сработают
             "kcal": round(kcal), "protein": round(protein)}
     await db.save_menu(day, data)
     return data
@@ -95,7 +97,8 @@ def menu_text(data: dict) -> str:
 
 
 def menu_kb(data: dict, day: str):
-    rows = [[(f"✅ Съел: {m['title']}"[:28], f"mn:eat:{day}:{i}"), ("🔁 Заменить", f"mn:sw:{day}:{i}")]
+    v = data.get("v", "0")
+    rows = [[(f"✅ Съел: {m['title']}"[:28], f"mn:eat:{day}:{v}:{i}"), ("🔁 Заменить", f"mn:sw:{day}:{v}:{i}")]
             for i, m in enumerate(data["meals"]) if i not in data["eaten"]]
     rows.append([("🔄 Всё меню заново", "mn:new"), ("⚙️ Настроить", "s:diet")])
     return kb.ikb(*rows)
@@ -117,7 +120,6 @@ async def _show(message: Message, profile, regenerate: bool = False) -> None:
         await message.answer(str(e))
 
 
-@router.message(F.text == kb.MENU)
 @router.message(Command("menu"))
 async def menu_cmd(message: Message, state: FSMContext, profile) -> None:
     await state.clear()
@@ -138,10 +140,10 @@ async def menu_new(cb: CallbackQuery, profile) -> None:
 
 @router.callback_query(F.data.startswith("mn:eat:"))
 async def menu_eat(cb: CallbackQuery, profile) -> None:
-    _, _, day, idx = cb.data.split(":")
+    _, _, day, v, idx = cb.data.split(":")
     idx = int(idx)
     data = await db.get_menu(day)
-    if day != db.today() or not data or idx >= len(data["meals"]):
+    if day != db.today() or not data or data.get("v", "0") != v or idx >= len(data["meals"]):
         return await cb.answer("Это меню уже неактуально, откройте /menu", show_alert=True)
     if idx in data["eaten"]:
         return await cb.answer("Уже записано")
@@ -155,9 +157,10 @@ async def menu_eat(cb: CallbackQuery, profile) -> None:
     await common.send_meal(cb.message, profile, mid)
 
 
-async def _menu_for(cb: CallbackQuery, day: str, idx: int) -> dict | None:
+async def _menu_for(cb: CallbackQuery, day: str, v: str, idx: int) -> dict | None:
     data = await db.get_menu(day)
-    if day != db.today() or not data or idx >= len(data["meals"]) or idx in data["eaten"]:
+    if (day != db.today() or not data or data.get("v", "0") != v
+            or idx >= len(data["meals"]) or idx in data["eaten"]):
         await cb.answer("Это меню уже неактуально, откройте /menu", show_alert=True)
         return None
     return data
@@ -166,15 +169,15 @@ async def _menu_for(cb: CallbackQuery, day: str, idx: int) -> dict | None:
 @router.callback_query(F.data.startswith("mn:sw:"))
 async def swap_ask(cb: CallbackQuery) -> None:
     """Один вопрос в момент замены: что именно не нравится. Ответ запоминается навсегда."""
-    _, _, day, idx = cb.data.split(":")
+    _, _, day, v, idx = cb.data.split(":")
     idx = int(idx)
-    data = await _menu_for(cb, day, idx)
+    data = await _menu_for(cb, day, v, idx)
     if not data:
         return
     meal = data["meals"][idx]
-    rows = [[(f"👎 Не ем: {_clean(i['name'])}"[:40], f"mn:dl:{day}:{idx}:{n}")]
+    rows = [[(f"👎 Не ем: {_clean(i['name'])}"[:40], f"mn:dl:{day}:{v}:{idx}:{n}")]
             for n, i in enumerate(meal["items"]) if not _is_shake(i)]
-    rows.append([("🔁 Всё ем, просто другое", f"mn:dl:{day}:{idx}:x"), ("← Назад", f"mn:back:{day}")])
+    rows.append([("🔁 Всё ем, просто другое", f"mn:dl:{day}:{v}:{idx}:x"), ("← Назад", f"mn:back:{day}")])
     await cb.answer()
     await cb.message.edit_text(
         menu_text(data) + f"\n\n❓ <b>Что не так в «{escape(meal['title'])}»?</b> "
@@ -192,9 +195,9 @@ async def swap_back(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("mn:dl:"))
 async def swap_do(cb: CallbackQuery, profile) -> None:
-    _, _, day, idx, item = cb.data.split(":")
+    _, _, day, v, idx, item = cb.data.split(":")
     idx = int(idx)
-    data = await _menu_for(cb, day, idx)
+    data = await _menu_for(cb, day, v, idx)
     if not data:
         return
     meal = data["meals"][idx]
@@ -280,7 +283,7 @@ async def toggle(cb: CallbackQuery, profile) -> None:
 async def shake_pick(cb: CallbackQuery) -> None:
     await cb.answer()
     prods = await db.products()
-    rows = [[(p["name"][:40], f"d:spn:{n}")] for n, p in enumerate(prods)]
+    rows = [[(p["name"][:40], f"d:spn:{p['id']}")] for p in prods]
     rows.append([("Без этикетки (оценка)", "d:spn:x")])
     await cb.message.answer("Какой протеин вы пьёте? Его этикетка пойдёт в меню. "
                             "Нет в списке — добавьте: ⚡ Быстрая запись → ➕ Новый продукт.", reply_markup=kb.ikb(*rows))
@@ -289,8 +292,8 @@ async def shake_pick(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("d:spn:"))
 async def shake_pick_set(cb: CallbackQuery) -> None:
     v = cb.data.split(":")[2]
-    prods = await db.products()
-    name = prods[int(v)]["name"] if v != "x" and int(v) < len(prods) else "-"
+    p = await db.get_product(int(v)) if v != "x" else None
+    name = p["name"] if p else "-"
     await db.update_profile(shake_product=name)
     await cb.answer("Сохранено")
     text, markup = await settings_text(await db.get_profile())
@@ -358,12 +361,11 @@ async def save_product(message: Message, text: str) -> None:
         await message.answer("Не нашёл калорийности. Скопируйте таблицу с этикетки или напишите, например: "
                              "«Hi Tec Protein, на 100 г 378 ккал, белок 79».")
         return
-    await db.add_product(name, round(p.kcal, 1), round(p.protein, 1), round(p.fat, 1), round(p.carbs, 1))
-    n = next(i for i, x in enumerate(await db.products()) if x["name"] == name)
+    pid = await db.add_product(name, round(p.kcal, 1), round(p.protein, 1), round(p.fat, 1), round(p.carbs, 1))
     await message.answer(
         "📦 Запомнил: " + _product_line({**p.model_dump(), "name": name}) +
         "\nЗаписывать: ⚡ Быстрая запись → выбрать → ввести вес.",
-        reply_markup=kb.ikb([(f"➕ Записать сейчас", f"pr:use:{n}")]))
+        reply_markup=kb.ikb([(f"➕ Записать сейчас", f"pr:use:{pid}")]))
 
 
 async def quick_screen(message: Message) -> None:
@@ -379,7 +381,7 @@ async def quick_screen(message: Message) -> None:
             "Пока пусто: запишите еду текстом или добавьте продукт с упаковки.",
             reply_markup=kb.ikb([("➕ Новый продукт", "pr:add")]))
         return
-    rows = [[(f"📦 {p['name'][:30]} · {p['kcal']:g}/100 г", f"pr:use:{n}")] for n, p in enumerate(prods)]
+    rows = [[(f"📦 {p['name'][:30]} · {p['kcal']:g}/100 г", f"pr:use:{p['id']}")] for p in prods]
     rows += [[(f"🕘 {m['raw_text'][:30]} · {fmt(m['kcal'])}", f"rep:{m['id']}")] for m in recent]
     last = [("➕ Новый продукт", "pr:add")]
     if prods:
@@ -398,13 +400,12 @@ async def products_screen(message: Message, manage: bool = False) -> None:
         await quick_screen(message)
         return
     prods = await db.products()
-    rows = [[(f"🗑 {p['name'][:30]}", f"pr:del:{n}")] for n, p in enumerate(prods)]
+    rows = [[(f"🗑 {p['name'][:30]}", f"pr:del:{p['id']}")] for p in prods]
     rows.append([("← Назад", "s:products")])
     await message.answer("Какой продукт удалить?\n" + "\n".join("• " + _product_line(p) for p in prods),
                          reply_markup=kb.ikb(*rows))
 
 
-@router.message(F.text.in_({kb.QUICK} | kb.OLD_QUICK))
 async def products_msg(message: Message, state: FSMContext) -> None:
     await state.clear()
     if message.text in kb.OLD_QUICK:
@@ -427,15 +428,13 @@ async def products_manage(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("pr:use:"))
 async def product_use(cb: CallbackQuery, state: FSMContext) -> None:
-    prods = await db.products()
-    n = int(cb.data.split(":")[2])
-    if n >= len(prods):
-        return await cb.answer("Продукт не найден", show_alert=True)
-    p = prods[n]
+    p = await db.get_product(int(cb.data.split(":")[2]))
+    if not p:
+        return await cb.answer("Продукт не найден — откройте «⚡ Быстрая запись» заново", show_alert=True)
     await state.set_state(Diet.grams)
     await state.update_data(product=p["name"])
     await cb.answer()
-    quick = [(f"{g:g} г", f"pr:g:{n}:{g:g}") for g in await db.recent_grams(p["name"])]
+    quick = [(f"{g:g} г", f"pr:g:{p['id']}:{g:g}") for g in await db.recent_grams(p["name"])]
     await cb.message.answer(f"Сколько граммов «{escape(p['name'])}»? Отправьте число."
                             + (" Или выберите прошлую порцию:" if quick else ""),
                             reply_markup=kb.ikb(quick) if quick else None)
@@ -452,20 +451,19 @@ async def _record_product(message: Message, profile, name: str, grams: float) ->
 
 @router.callback_query(F.data.startswith("pr:g:"))
 async def product_quick(cb: CallbackQuery, state: FSMContext, profile) -> None:
-    _, _, n, g = cb.data.split(":")
-    prods = await db.products()
+    _, _, pid, g = cb.data.split(":")
+    p = await db.get_product(int(pid))
     await state.clear()
     await cb.answer()
-    if int(n) < len(prods):
-        await _record_product(cb.message, profile, prods[int(n)]["name"], float(g))
+    if not p:
+        return await cb.message.answer("Этот продукт уже удалён.")
+    await _record_product(cb.message, profile, p["name"], float(g))
 
 
 @router.message(Diet.grams, F.text)
 async def product_grams(message: Message, state: FSMContext, profile) -> None:
-    try:
-        g = float(message.text.lower().replace(",", ".").replace("г", "").strip())
-    except ValueError:
-        g = 0
+    m = re.match(r"\s*(\d+(?:[.,]\d+)?)", message.text)
+    g = float(m.group(1).replace(",", ".")) if m else 0
     if not 1 <= g <= 2000:
         return await message.answer("Введите вес в граммах числом, например 30. Отмена: /cancel")
     name = (await state.get_data())["product"]
@@ -491,10 +489,7 @@ async def product_text(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("pr:del:"))
 async def product_del(cb: CallbackQuery) -> None:
-    prods = await db.products()
-    n = int(cb.data.split(":")[2])
-    if n < len(prods):
-        await db.delete_product(prods[n]["name"])
+    await db.delete_product(int(cb.data.split(":")[2]))
     await cb.answer("Удалено")
     await cb.message.delete()
     await products_screen(cb.message)

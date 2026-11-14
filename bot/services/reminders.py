@@ -47,6 +47,7 @@ async def weight_reminder(bot: Bot, profile, now: datetime) -> None:
         text = "⚖️ Вес всё ещё не внесён. Встаньте на весы и отправьте число."
     else:
         text = "⚖️ Доброе утро! Время взвеситься: после туалета, до еды и воды. Отправьте число."
+    await common.drop_weight_reminder(bot, profile["chat_id"], db.days_ago(1))  # вчерашнее, если осталось
     await common.drop_weight_reminder(bot, profile["chat_id"])
     msg = await bot.send_message(profile["chat_id"], text, reply_markup=kb.weight_remind)
     await db.set_day_state(last_weight_remind=now.isoformat(timespec="minutes"), remind_msg=msg.message_id)

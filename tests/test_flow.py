@@ -269,16 +269,17 @@ def test_products(h):
         out = await h.tap("s:products")
         assert "📦 — выбрать продукт и ввести вес" in out and "🕘 — записать ещё раз" in out
         # выбор продукта кнопкой и ввод веса
-        await h.tap("pr:use:0")
+        pid = (await db.products())[0]["id"]
+        await h.tap(f"pr:use:{pid}")
         out = await h.say("30")
         assert "hi tec protein 30 г — 114 ккал" in out and "по этикетке" in out
-        out = await h.tap("pr:use:0")
+        out = await h.tap(f"pr:use:{pid}")
         assert "прошлую порцию" in out                            # есть быстрая кнопка
         assert await db.recent_grams("hi tec protein") == [30.0, 110.0]
-        assert "114 ккал" in await h.tap("pr:g:0:30")
+        assert "114 ккал" in await h.tap(f"pr:g:{pid}:30")
         assert "Отправьте число" not in await h.say("📊 Сегодня")   # кнопка меню сбрасывает ввод веса
         await h.tap("pr:manage")
-        await h.tap("pr:del:0")
+        await h.tap(f"pr:del:{pid}")
         assert await db.products() == []
     run(h, go)
 
@@ -309,16 +310,17 @@ def test_daily_menu_and_shake(h):
 
         # замена блюда: один вопрос, нелюбимое запоминается, коктейль остаётся
         day = db.today()
-        assert "Что не так в «Ужин, 19:00»" in await h.tap(f"mn:sw:{day}:1")
-        out = await h.tap(f"mn:dl:{day}:1:0")
+        v = (await db.get_menu(day))["v"]
+        assert "Что не так в «Ужин, 19:00»" in await h.tap(f"mn:sw:{day}:{v}:1")
+        out = await h.tap(f"mn:dl:{day}:{v}:1:0")
         assert "индейка с рисом" in out and "курица с гречкой" not in out
         assert h.llm_calls["swap"] == ("Ужин, 19:00", 500, 50, ["курица с гречкой"])
         assert (await db.get_profile())["diet_dislikes"] == "курица с гречкой"
 
         # «съел по плану» — без Claude и только один раз
-        out = await h.tap(f"mn:eat:{day}:0")
+        out = await h.tap(f"mn:eat:{day}:{v}:0")
         assert "Обед, 12:00 — 420 ккал" in out and "Осталось на сегодня: <b>1 080 ккал</b>" in out
-        await h.tap(f"mn:eat:{day}:0")
+        await h.tap(f"mn:eat:{day}:{v}:0")
         assert len(await db.meals_on(day)) == 1
         assert "✅ <b>Обед, 12:00</b>" in await h.say("🥗 Меню")
 
@@ -402,7 +404,8 @@ def test_goal_service_export_shake_pick(h):
         await db.add_product("hi tec protein", 378, 79, 3.7, 7.1)
         await db.add_product("kfd pure wpc", 391, 79, 6.5, 4)
         assert "Протеин: <b>hi tec protein</b>" in await h.tap("s:diet")    # без выбора — первый похожий
-        out = await h.tap("d:spn:1")
+        wpc = next(x["id"] for x in await db.products() if x["name"] == "kfd pure wpc")
+        out = await h.tap(f"d:spn:{wpc}")
         assert "Протеин: <b>kfd pure wpc</b>" in out
         out = await h.tap("d:spn:x")
         assert "по оценке, без этикетки" in out
@@ -490,4 +493,93 @@ def test_panel_and_bottom_buttons(h):
         assert "влезет ли в остаток (1 050 ккал)" in await h.say("❓ Можно ли?")
         assert "Влезает: после этого останется 730" in await h.say("шаурма")  # ответ на «Можно ли?»
         assert "Панель внизу обновлена" in await h.say("🍽 Еда")   # старая кнопка работает
+    run(h, go)
+
+
+
+def test_review_regressions(h):
+    """Ошибки из финального ревью."""
+    async def go():
+        await onboard(h)
+        from bot import keyboards as kb
+
+        # 1. график с весом, но без еды не падает
+        assert "Всё наблюдение" in await h.say("/chart")
+        assert any(type(c).__name__ == "SendPhoto" for c in h.session.calls)
+
+        # 2. кнопка панели во время вопроса отменяет его, а не сохраняется как ответ
+        await h.tap("d:prefs")
+        assert "влезет ли в остаток" in await h.say("❓ Можно ли?")
+        assert (await db.get_profile())["diet_prefs"] == ""
+        await h.say("/cancel")
+        await h.say("450 ккал")
+        mid = (await db.last_meal())["id"]
+        await h.tap(f"m:edit:{mid}")
+        await h.say("⚡ Быстрая запись")
+        assert (await db.get_meal(mid))["kcal"] == 450
+
+        # 3. спецсимволы в названии не ломают HTML отчёта
+        out = await h.say("M&M's <3 250 ккал")
+        out = await h.say("📊 Отчёт")
+        assert "M&amp;M&#x27;s &lt;3" in out or "M&amp;M's &lt;3" in out
+
+        # 4. после «Не всё» вечером снова можно отметить «Всё записал»
+        await h.tap(f"dc:-1:{db.today()}")
+        from bot.handlers import common
+        import bot.db as dbm
+        real_now = dbm.now
+        dbm.now = lambda: real_now().replace(hour=20)
+        try:
+            markup = await common.today_markup()
+        finally:
+            dbm.now = real_now
+        assert any(b.callback_data == f"dc:1:{db.today()}" for row in markup.inline_keyboard for b in row)
+
+        # 5. кнопки старого меню после «Всё меню заново» не срабатывают
+        await h.say("/menu")
+        old_v = (await db.get_menu(db.today()))["v"]
+        await h.tap("mn:new")
+        n = len(await db.meals_on(db.today()))
+        out = await h.tap(f"mn:eat:{db.today()}:{old_v}:0")
+        assert len(await db.meals_on(db.today())) == n
+
+        # 6. кнопки продуктов не сдвигаются при добавлении нового
+        tid = await db.add_product("творог", 98, 17, 2, 3)
+        await db.add_product("банан", 89, 1, 0, 23)                 # встаёт раньше по алфавиту
+        out = await h.tap(f"pr:use:{tid}")
+        assert "«творог»" in out
+        # 8. «200 гр» принимается
+        out = await h.say("200 гр")
+        assert "творог 200 г — 196 ккал" in out
+
+        # 10. /undo удаляет сегодняшнюю запись, даже если последней была запись за вчера
+        await h.say("вчера: 300 ккал")
+        out = await h.say("/undo")
+        assert "Удалил" in out and len(await db.meals_on(db.days_ago(1))) == 1
+    run(h, go)
+
+
+def test_yesterday_reminder_removed(h):
+    async def go():
+        await onboard(h)
+        from aiogram.methods import DeleteMessage
+        await db.set_day_state(db.days_ago(1), remind_msg=555)
+        await db.delete_weight(db.today())
+        p = await db.get_profile()
+        h.session.calls.clear()
+        await reminders.weight_reminder(h.bot, p, db.now().replace(hour=8, minute=0))
+        assert 555 in [c.message_id for c in h.session.calls if isinstance(c, DeleteMessage)]
+        assert (await db.day_state(db.days_ago(1)))["remind_msg"] is None
+    run(h, go)
+
+
+def test_all_chart_after_profile_redo(h):
+    async def go():
+        await onboard(h)
+        from bot.services import report_view
+        for i in range(20, 0, -1):
+            await db.add_weight(92 - 0.2 * (20 - i), db.days_ago(i))
+        await db.update_profile(start_weight=88.0)                 # как после «Профиль заново»
+        text, png = await report_view.build(await db.get_profile(), 0)
+        assert "Старт 92" in text and png
     run(h, go)

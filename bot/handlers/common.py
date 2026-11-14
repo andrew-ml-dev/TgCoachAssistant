@@ -78,14 +78,14 @@ async def record_food_text(message: Message, profile, text: str, allow_question:
     return None
 
 
-async def drop_weight_reminder(bot, chat_id: int) -> None:
-    st = await db.day_state()
+async def drop_weight_reminder(bot, chat_id: int, day: str | None = None) -> None:
+    st = await db.day_state(day)
     if st["remind_msg"]:
         try:
             await bot.delete_message(chat_id, st["remind_msg"])
         except TelegramBadRequest:
             pass
-        await db.set_day_state(remind_msg=None)
+        await db.set_day_state(day, remind_msg=None)
 
 
 async def record_weight(message: Message, profile, value: float) -> None:
@@ -126,7 +126,7 @@ async def record_steps(message: Message, profile, steps: int) -> None:
 async def today_markup():
     extra = [[("📋 Приёмы пищи", "t:meals")]]
     st = await db.day_state()
-    if db.now().hour >= 18 and st["complete"] == 0 and (await db.day_totals(db.today()))["n"]:
+    if db.now().hour >= 18 and st["complete"] != 1 and (await db.day_totals(db.today()))["n"]:
         extra[0].append(("✅ Всё записал", f"dc:1:{db.today()}"))
     return kb.report_menu("r:1", extra)
 
@@ -156,8 +156,10 @@ async def show_report(message: Message, profile, period: str, replace: bool = Fa
         if replace and not png and not is_photo:
             await message.edit_text(text, reply_markup=markup)
             return
-    except TelegramBadRequest:  # то же содержимое — нечего менять
-        return
+    except TelegramBadRequest as e:
+        if "not modified" in str(e):  # то же содержимое — нечего менять
+            return
+        raise
     if replace:
         try:
             await message.delete()

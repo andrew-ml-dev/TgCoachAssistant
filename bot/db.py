@@ -147,9 +147,6 @@ async def set_budget(tdee: int, budget: int) -> None:
     await _exec("INSERT INTO budget_history VALUES (?, ?, ?)", today(), tdee, budget)
 
 
-async def tdee_history() -> list[aiosqlite.Row]:
-    return await _all("SELECT date, tdee FROM budget_history ORDER BY date, rowid")
-
 
 # ---------- вес ----------
 
@@ -316,11 +313,17 @@ async def cache_del(key: str) -> None:
 
 
 async def products() -> list[dict]:
-    return [dict(r) for r in await _all("SELECT * FROM products ORDER BY name")]
+    return [dict(r) for r in await _all("SELECT rowid AS id, * FROM products ORDER BY name")]
 
 
-async def add_product(name: str, kcal: float, protein: float, fat: float, carbs: float) -> None:
-    await _exec("INSERT OR REPLACE INTO products VALUES (?,?,?,?,?)", name, kcal, protein, fat, carbs)
+async def get_product(pid: int) -> dict | None:
+    r = await _one("SELECT rowid AS id, * FROM products WHERE rowid = ?", pid)
+    return dict(r) if r else None
+
+
+async def add_product(name: str, kcal: float, protein: float, fat: float, carbs: float) -> int:
+    return await _exec("INSERT OR REPLACE INTO products (name, kcal, protein, fat, carbs) VALUES (?,?,?,?,?)",
+                       name, kcal, protein, fat, carbs)
 
 
 async def recent_grams(name: str, limit: int = 3) -> list[float]:
@@ -333,8 +336,8 @@ async def recent_grams(name: str, limit: int = 3) -> list[float]:
     return out[:limit]
 
 
-async def delete_product(name: str) -> None:
-    await _exec("DELETE FROM products WHERE name = ?", name)
+async def delete_product(pid: int) -> None:
+    await _exec("DELETE FROM products WHERE rowid = ?", pid)
 
 
 # ---------- меню на день ----------

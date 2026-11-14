@@ -145,7 +145,6 @@ async def meal_del_from_list(cb: CallbackQuery, profile) -> None:
 
 # ---------- «можно ли?» ----------
 
-@router.message(F.text == kb.CAN)
 async def can_start_msg(message: Message, state: FSMContext, profile) -> None:
     await state.set_state(Food.can)
     _, left, _ = await budget.remaining(profile)

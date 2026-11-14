@@ -161,6 +161,8 @@ def report_chart(d: ReportData) -> bytes:
     _style(ax2)
     ax2.set_title("Калории за день", loc="left", color=INK, fontsize=12, fontweight="medium", pad=10)
     cd = [x for x in d.days if x in d.kcal]
+    if not cd:
+        ax2.text(0.5, 0.5, "Записей еды за период нет", transform=ax2.transAxes, color=MUTED, ha="center")
     kmax = max([d.kcal[x][0] for x in cd] + [d.tdee, d.budget])
     ax2.set_ylim(0, kmax * 1.14)
     ax2.set_xlim(xmin, xmax)
@@ -186,8 +188,9 @@ def report_chart(d: ReportData) -> bytes:
                     NODATA: Patch(facecolor=NODATA, hatch="////", edgecolor="none", label="неполный"),
                     "#4b5563": Patch(facecolor="#4b5563", label="сегодня")}
     handles = [h for c, h in legend_items.items() if c in colors]  # только то, что есть на графике
-    ax2.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, -0.3), ncol=len(handles), frameon=False,
-               fontsize=9.5, labelcolor=INK2, handlelength=1.1, handleheight=1.1, columnspacing=1.4)
+    if handles:
+        ax2.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, -0.3), ncol=len(handles), frameon=False,
+                   fontsize=9.5, labelcolor=INK2, handlelength=1.1, handleheight=1.1, columnspacing=1.4)
 
     # подписи дат
     if span <= 10:

@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from .. import db
 from . import charts, nutrition, weekly
-from .budget import MONTHS, cumulative_line, fmt, period_text
+from .budget import MONTHS, fmt, period_text
 
 CHART_PERIODS = (7, 0)
 
@@ -38,8 +38,9 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
         return "За этот период пока нет ни записей еды, ни взвешиваний.", None
 
     # расчётный вес: от первого тренда периода (или стартового веса) минус накопленный дефицит
-    base = profile["start_weight"] if not days or not wrows else wrows[0]["trend"]
-    base_day = start if not days or not wrows else date.fromisoformat(wrows[0]["date"])
+    # профиль могли пересоздать, и start_weight тогда — вес на момент пересоздания, поэтому берём первое взвешивание
+    base = wrows[0]["trend"] if wrows else profile["start_weight"]
+    base_day = date.fromisoformat(wrows[0]["date"]) if wrows else start
     kcal_by = {d["date"]: d["kcal"] for d in logged}
     expected, cum = [], 0.0
     for d in span:
@@ -94,7 +95,8 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
     if not days:
         last = await db.last_weight()
         if last:
-            lines.append(f"🎯 Старт {profile['start_weight']:g} → сейчас {last['trend']:.1f} → цель {profile['target_weight']:g} кг")
+            first_w = wrows[0]["weight"] if wrows else profile["start_weight"]
+            lines.append(f"🎯 Старт {first_w:g} → сейчас {last['trend']:.1f} → цель {profile['target_weight']:g} кг")
         rate = nutrition.weekly_rate(await weekly.weight_points())
         if rate is not None:
             fd = nutrition.forecast_date(last["trend"], profile["target_weight"], rate, today)

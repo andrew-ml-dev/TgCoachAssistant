@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from html import escape
 
 from .. import db
 from . import nutrition
@@ -45,27 +46,6 @@ async def week_balance(profile) -> tuple[float, int] | None:
     if not days:
         return None
     return sum(d["kcal"] - profile["budget"] for d in days), len(days)
-
-
-async def cumulative(profile) -> tuple[float, int] | None:
-    """Накопленный дефицит (расход − съедено) по вчера включительно.
-
-    Считаются только надёжные дни (см. db.counted_days): неполный день выглядел бы как голодание.
-    Расход для каждого дня берётся тот, что действовал в расчётах на эту дату.
-    """
-    days = await db.counted_days("0000", db.days_ago(1), profile["budget"])
-    if not days:
-        return None
-    hist = await db.tdee_history()
-
-    def tdee_on(day: str) -> float:
-        t = hist[0]["tdee"] if hist else profile["tdee"]
-        for h in hist:
-            if h["date"] <= day:
-                t = h["tdee"]
-        return t
-
-    return sum(tdee_on(d["date"]) - d["kcal"] for d in days), len(days)
 
 
 def _signed(n: float) -> str:
@@ -114,7 +94,7 @@ async def today_text(profile) -> str:
     meals = await db.meals_on(day)
     if meals:
         lines.append("")
-        lines += [f"• {m['title']} — {fmt(m['kcal'])}" for m in meals]
+        lines += [f"• {escape(m['title'])} — {fmt(m['kcal'])}" for m in meals]
     return "\n".join(lines)
 
 
@@ -172,19 +152,6 @@ async def period_text(profile, days: int) -> str:
     elif ws:
         lines.append(f"⚖️ Вес: {ws[0]['weight']:.1f} (одно взвешивание)")
     return "\n".join(lines)
-
-
-async def cumulative_line(profile) -> str | None:
-    cum = await cumulative(profile)
-    if not cum:
-        return None
-    kg = cum[0] / nutrition.KCAL_PER_KG
-    line = (f"📉 Накоплено с начала ({cum[1]} надёжн. дн., по вчера): {'дефицит' if cum[0] >= 0 else 'профицит'} "
-            f"{fmt(abs(cum[0]))} ккал ≈ {-kg:+.1f} кг → расчётный вес <b>{profile['start_weight'] - kg:.1f}</b>")
-    last = await db.last_weight()
-    if last:
-        line += f", по весам {last['trend']:.1f}"
-    return line
 
 
 async def pace_text(profile) -> str:
