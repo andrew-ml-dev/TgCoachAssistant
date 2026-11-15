@@ -85,7 +85,7 @@ async def connect(code: str) -> tuple[str, int]:
                           headers={"Authorization": _basic(), "Accept": "application/json;charset=UTF-8"}) as r:
             body = await r.json(content_type=None)
             if r.status != 200:
-                log.warning("Polar token %s: %s", r.status, body)
+                log.warning("Polar token %s: %s", r.status, body.get("error") if isinstance(body, dict) else "")
                 raise PolarError("Polar не принял код. Он одноразовый и живёт 10 минут — "
                                  "нажмите ссылку подключения ещё раз.")
         token, uid = body["access_token"], int(body["x_user_id"])
@@ -94,8 +94,8 @@ async def connect(code: str) -> tuple[str, int]:
             if r.status == 403:
                 raise PolarError("Polar требует принять согласия на передачу данных. Откройте flow.polar.com, "
                                  "примите их и подключитесь заново.")
-            if r.status not in (200, 409):  # 409 — уже зарегистрирован, это нормально
-                log.warning("Polar register %s: %s", r.status, await r.text())
+            if r.status not in (200, 201, 409):  # 201 — зарегистрирован, 409 — уже был, оба нормально
+                log.warning("Polar register %s", r.status)  # тело не пишем: там имя и дата рождения
                 raise PolarError(f"Polar ответил ошибкой {r.status} при регистрации. Попробуйте позже.")
     return token, uid
 
