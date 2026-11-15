@@ -84,7 +84,12 @@ async def today_text(profile) -> str:
     lines.append(f"⚖️ Баланс сейчас: {spent} − съедено {fmt(eaten)} = "
                  f"<b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>")
     if wo:
-        lines.append("🏋️ Тренировка идёт в дефицит, бюджет еды я не увеличиваю — так быстрее к цели.")
+        parts = []
+        for w in await db.workouts_on(day):
+            mins = f" {w['minutes']} мин" if w["minutes"] and str(w["minutes"]) not in w["descr"] else ""
+            hr = f", пульс {w['hr_avg']}" if w["hr_avg"] else ""
+            parts.append(f"{escape(w['descr'])}{mins}{hr} → {fmt(w['kcal'])}")
+        lines.append("🏋️ " + "; ".join(parts) + ". Идёт в дефицит, бюджет еды не растёт.")
     act = await db.activity_kcal(day)
     if act:
         lines.append(f"🏃 Шаги: ≈{fmt(act)} ккал (уже входят в расход, отдельно не прибавляю)")

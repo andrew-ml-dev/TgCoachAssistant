@@ -1,6 +1,7 @@
 """Подключение Polar Flow и импорт тренировок."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from datetime import datetime
@@ -20,6 +21,8 @@ router = Router()
 
 SYNC_EVERY = 15 * 60
 _last_sync: datetime | None = None
+_lock = asyncio.Lock()  # кнопка «Проверить сейчас» и планировщик не должны импортировать одно и то же дважды
+WEIGHT_STEP = 3.0       # кг по тренду, после которых напомнить обновить вес в профиле Polar
 
 
 class Polar(StatesGroup):
@@ -72,10 +75,10 @@ async def got_code(message: Message, state: FSMContext, profile) -> None:
     if "state=" in message.text and f"state={data.get('polar_state')}" not in message.text:
         return await message.answer("Это адрес от старой ссылки. Откройте последнюю ссылку подключения. Отмена: /cancel")
     code = polar.extract_code(message.text)
-    if not code:
-        return await message.answer("Не нашёл код в сообщении. Пришлите адрес страницы целиком: "
-                                    "http://localhost:5000/oauth2_callback?code=… Отмена: /cancel")
     await state.clear()
+    if not code:  # не держим человека в режиме ввода кода: следующее сообщение должно работать как обычно
+        return await message.answer("Не нашёл код Polar в сообщении, подключение отменил. Чтобы попробовать снова — "
+                                    "/polar и пришлите адрес страницы целиком (http://localhost:5000/oauth2_callback?code=…).")
     try:
         token, uid = await polar.connect(code)
     except polar.PolarError as e:
@@ -84,6 +87,9 @@ async def got_code(message: Message, state: FSMContext, profile) -> None:
         log.exception("Polar connect")
         return await message.answer("Не удалось связаться с Polar. Попробуйте ещё раз через пару минут: /polar")
     await db.update_profile(polar_token=token, polar_user=uid)
+    last = await db.last_weight()
+    if last:
+        await db.mark_flag("polar_weight_ref", f"{last['trend']:.1f}")
     await message.answer(
         "✅ <b>Polar Flow подключён.</b>\n"
         "Новые тренировки буду забирать сами каждые 15 минут после того, как H10 синхронизируется "
@@ -132,9 +138,34 @@ def card(e: polar.Exercise, net: int) -> str:
 
 async def sync(bot: Bot, profile, force: bool = False) -> int | None:
     """Забирает новые тренировки. Возвращает число добавленных или None при ошибке."""
-    global _last_sync
     if not profile or not profile["polar_token"] or not polar.configured():
         return None
+    async with _lock:
+        return await _sync(bot, profile, force)
+
+
+async def weight_hint(bot: Bot, profile) -> None:
+    """Polar считает калории от веса в своём профиле: при похудении цифры завышаются, если вес там старый."""
+    if not profile["polar_token"]:
+        return
+    last = await db.last_weight()
+    ref = await db.get_flag("polar_weight_ref")
+    if not last:
+        return
+    if ref is None:
+        await db.mark_flag("polar_weight_ref", f"{last['trend']:.1f}")
+        return
+    if float(ref) - last["trend"] >= WEIGHT_STEP:
+        await bot.send_message(
+            profile["chat_id"],
+            f"⌚ С подключения Polar вы похудели на {float(ref) - last['trend']:.1f} кг. Обновите вес в Polar Flow "
+            f"(Настройки → Физические данные → {last['trend']:.0f} кг): от него Polar считает калории тренировок, "
+            "и со старым весом цифры будут завышены.")
+        await db.mark_flag("polar_weight_ref", f"{last['trend']:.1f}")
+
+
+async def _sync(bot: Bot, profile, force: bool) -> int | None:
+    global _last_sync
     now = db.now()
     if not force and _last_sync and (now - _last_sync).total_seconds() < SYNC_EVERY:
         return None

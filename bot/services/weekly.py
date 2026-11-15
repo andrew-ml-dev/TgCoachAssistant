@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from .. import db
 from . import nutrition
@@ -41,6 +41,31 @@ async def real_tdee(profile) -> tuple[int | None, str]:
                   f"(в расчётах сейчас {fmt(profile['tdee'])}).")
 
 
+async def workouts_summary(profile, since: str, until: str) -> list[str]:
+    """Тренировки за неделю против прошлой и против того, что нужно для выбранного темпа."""
+    ws = await db.workouts_between(since, until)
+    prev_since = (date.fromisoformat(since) - timedelta(days=7)).isoformat()
+    prev = await db.workouts_between(prev_since, (date.fromisoformat(since) - timedelta(days=1)).isoformat())
+    if not ws and not prev:
+        return []
+    kcal, mins = sum(w["kcal"] for w in ws), sum(w["minutes"] or 0 for w in ws)
+    line = f"🏋️ Тренировки: {len(ws)}, {fmt(kcal)} ккал в расход"
+    if mins:
+        line += f", {mins // 60} ч {mins % 60:02d} мин"
+    if prev:
+        line += f" (прошлая неделя: {len(prev)}, {fmt(sum(w['kcal'] for w in prev))} ккал)"
+    out = [line]
+    # при бюджете на полу темп добирается только активностью: сколько её нужно и сколько было
+    need = nutrition.extra_activity_needed(profile["tdee"], profile["budget"], profile["pace"]) * 7
+    if need:
+        if kcal >= need:
+            out.append(f"   Для темпа {profile['pace']:g} кг/нед нужно ≈{fmt(need)} ккал активности в неделю — выполнено ✅")
+        else:
+            out.append(f"   Для темпа {profile['pace']:g} кг/нед нужно ≈{fmt(need)} ккал активности в неделю, "
+                       f"сделано {fmt(kcal)} ({round(kcal / need * 100)}%)")
+    return out
+
+
 async def build(profile) -> Weekly:
     since, until = db.days_ago(7), db.days_ago(1)
     days = await db.counted_days(since, until, profile["budget"])
@@ -60,10 +85,7 @@ async def build(profile) -> Weekly:
     else:
         lines.append("Полностью записанных дней за неделю нет." if logged else "Записей еды за неделю нет.")
 
-    wo = await db.workouts_by_day(since, until)
-    if wo:
-        lines.append(f"🏋️ Тренировки: {len(wo)} дн., всего {fmt(sum(wo.values()))} ккал "
-                     f"(в среднем +{fmt(sum(wo.values()) / 7)} ккал/день к расходу)")
+    lines += await workouts_summary(profile, since, until)
 
     pts = await weight_points()
     last = await db.last_weight()

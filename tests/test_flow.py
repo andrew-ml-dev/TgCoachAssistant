@@ -736,3 +736,52 @@ def test_polar_import(h, monkeypatch):
         assert await polar.sync(h.bot, p, force=True) is None
         assert "отозвал доступ" in h.out() and (await db.get_profile())["polar_token"] is None
     run(h, go)
+
+
+def test_polar_extras(h, monkeypatch):
+    from bot.services import polar as ps, weekly
+    monkeypatch.setattr(ps, "configured", lambda: True)
+    feed = []
+
+    async def fake_exercises(token):
+        return [ps.parse(e) for e in feed]
+
+    monkeypatch.setattr(ps, "exercises", fake_exercises)
+
+    async def go():
+        await onboard(h)                                         # расход 2585, бюджет 1500, темп 2
+        # неверный ввод в режиме кода — режим снимается, следующее сообщение работает как обычно
+        await h.say("/polar")
+        assert "подключение отменил" in await h.say("трен 650")
+        assert "в расход <b>552 ккал</b>" in await h.say("трен 650")
+        await db.delete_workout((await db.workouts_on(db.today()))[0]["id"])
+
+        await db.add_weight(92.0)
+        await db.update_profile(polar_token="T", polar_user=1)
+        await db.mark_flag("polar_weight_ref", "92.0")
+        feed.append({"id": "E9", "start_time": f"{db.today()}T07:00:00", "duration": "PT45M", "calories": 500,
+                     "sport": "OTHER", "detailed_sport_info": "AQUA_FITNESS", "heart_rate": {"average": 120, "maximum": 150}})
+        p = await db.get_profile()
+        assert await polar.sync(h.bot, p, force=True) == 1
+        # ручная запись поверх импортированной — предупреждение о двойном счёте
+        out = await h.say("зал 480")
+        assert "уже пришла тренировка из Polar: aqua fitness 45 мин" in out and "посчитаются дважды" in out
+        manual = (await db.workouts_on(db.today()))[-1]["id"]
+        await h.tap(f"wo:del:{manual}")
+        assert await db.workout_kcal(db.today()) == 425
+
+        out = await h.tap("r:1")
+        assert "aqua fitness 45 мин, пульс 120 → 425" in out
+
+        # недельная сводка: тренировки против нужного для темпа
+        lines = await weekly.workouts_summary(p, db.days_ago(6), db.today())
+        assert "Тренировки: 1, 425 ккал в расход, 0 ч 45 мин" in lines[0]
+        assert "Для темпа 2 кг/нед нужно" in lines[1] and "сделано 425" in lines[1]
+
+        # похудел на 3 кг с подключения — одно напоминание обновить вес в Polar
+        for v in (90.0, 89.5, 89.0, 88.5, 88.0, 87.5, 87.0, 86.0, 85.5, 85.0, 84.5):
+            await db.add_weight(v)
+        out = await h.say("84.5")
+        assert "Обновите вес в Polar Flow" in out
+        assert "Обновите вес в Polar Flow" not in await h.say("84.4")
+    run(h, go)

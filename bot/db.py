@@ -458,6 +458,12 @@ async def mark_sent(flag: str, day: str | None = None) -> bool:
     return True
 
 
+async def get_flag(name: str) -> str | None:
+    await _db.execute("CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY, value TEXT)")
+    r = await _one("SELECT value FROM flags WHERE name = ?", name)
+    return r["value"] if r else None
+
+
 async def mark_flag(name: str, value: str) -> bool:
     """Сохраняет значение флага; True, если оно изменилось."""
     await _db.execute("CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY, value TEXT)")

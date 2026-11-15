@@ -113,6 +113,8 @@ async def record_weight(message: Message, profile, value: float) -> None:
         lines.append("<i>Скачок за день — это вода и содержимое кишечника, не жир. Смотрите на тренд.</i>")
     await message.answer("\n".join(lines), reply_markup=kb.weight_menu)
     await panel.refresh(message.bot, profile)
+    from .polar import weight_hint
+    await weight_hint(message.bot, profile)
 
 
 async def record_steps(message: Message, profile, steps: int) -> None:
@@ -126,8 +128,9 @@ async def record_steps(message: Message, profile, steps: int) -> None:
 async def record_workout(message: Message, profile, raw: float, label: str = "", day: str | None = None) -> None:
     """Калории тренировки с часов: идут в расход дня, бюджет еды не меняют."""
     net = nutrition.workout_net(raw)
-    wid = await db.add_workout(label or "тренировка", raw, net, day)
     day = day or db.today()
+    imported = [w for w in await db.workouts_on(day) if w["ext_id"]]
+    wid = await db.add_workout(label or "тренировка", raw, net, day)
     eaten = (await db.day_totals(day))["kcal"]
     wo = await db.workout_kcal(day)
     spent = profile["tdee"] + wo
@@ -140,7 +143,13 @@ async def record_workout(message: Message, profile, raw: float, label: str = "",
         f"Баланс: съедено {fmt(eaten)} → <b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>",
         "Бюджет еды прежний: тренировка ускоряет похудение, а не даёт право съесть больше.",
     ]
-    await message.answer("\n".join(lines), reply_markup=kb.ikb([("❌ Удалить", f"wo:del:{wid}")]))
+    markup = kb.ikb([("❌ Удалить", f"wo:del:{wid}")])
+    if imported:
+        p = imported[-1]
+        lines.append(f"\n⚠️ За этот день уже пришла тренировка из Polar: {p['descr']}, {fmt(p['raw_kcal'])} ккал. "
+                     "Если это она же — уберите ручную запись, иначе калории посчитаются дважды.")
+        markup = kb.ikb([("🔁 Та же — убрать ручную", f"wo:del:{wid}")], [("Разные, оставить", "wo:keep")])
+    await message.answer("\n".join(lines), reply_markup=markup)
     await panel.refresh(message.bot, profile)
 
 

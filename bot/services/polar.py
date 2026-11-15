@@ -113,7 +113,8 @@ def parse(e: dict) -> Exercise | None:
     if not e.get("calories"):
         return None
     sport = (e.get("detailed_sport_info") or e.get("sport") or "").upper()
-    name = SPORTS.get(sport) or SPORTS.get((e.get("sport") or "").upper()) or "тренировка"
+    name = (SPORTS.get(sport) or SPORTS.get((e.get("sport") or "").upper())
+            or (sport.replace("_", " ").lower() if sport else "тренировка"))
     hr = e.get("heart_rate") or {}
     return Exercise(id=str(e["id"]), date=(e.get("start_time") or "")[:10], sport=name,
                     minutes=_minutes(e.get("duration")), kcal=int(e["calories"]),

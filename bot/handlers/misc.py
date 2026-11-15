@@ -47,6 +47,12 @@ async def workout_kcal(message: Message, state: FSMContext, profile) -> None:
                                 data.get("wo_day"))
 
 
+@router.callback_query(F.data == "wo:keep")
+async def workout_keep(cb: CallbackQuery) -> None:
+    await cb.answer("Оставил обе")
+    await cb.message.edit_reply_markup(reply_markup=None)
+
+
 @router.callback_query(F.data.startswith("wo:del:"))
 async def workout_del(cb: CallbackQuery, profile) -> None:
     wid = int(cb.data.split(":")[2])
