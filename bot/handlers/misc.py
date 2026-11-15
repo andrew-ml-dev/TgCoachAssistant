@@ -4,10 +4,11 @@ from datetime import timedelta
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from .. import db, keyboards as kb
-from ..services import llm
+from ..services import budget, llm, panel
 from ..services.parser import classify
 from . import common, diet
 from .food import Food
@@ -16,6 +17,46 @@ router = Router()
 
 RE_YESTERDAY = re.compile(r"^вчера[:,\s]+(.+)$", re.I | re.S)
 RE_PRODUCT = re.compile(r"^продукт[:\s]+(.+)$", re.I | re.S)
+WORKOUT_ASK = ("Сколько калорий показали часы за тренировку? Отправьте число, например <code>650</code>.\n"
+               "В следующий раз можно сразу одним сообщением: <code>трен 650</code>, <code>зал + дорожка 650</code>. "
+               "Отмена: /cancel")
+
+
+class Workout(StatesGroup):
+    kcal = State()
+
+
+# ---------- тренировки ----------
+
+@router.callback_query(F.data == "wo:ask")
+async def workout_ask(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Workout.kcal)
+    await state.update_data(wo_label="тренировка", wo_day=None)
+    await cb.answer()
+    await cb.message.answer(WORKOUT_ASK)
+
+
+@router.message(Workout.kcal, F.text)
+async def workout_kcal(message: Message, state: FSMContext, profile) -> None:
+    m = re.search(r"\d{2,4}", message.text)
+    if not m or not 30 <= int(m.group()) <= 3000:
+        return await message.answer("Нужно число калорий с часов, например 650. Отмена: /cancel")
+    data = await state.get_data()
+    await state.clear()
+    await common.record_workout(message, profile, int(m.group()), data.get("wo_label") or "тренировка",
+                                data.get("wo_day"))
+
+
+@router.callback_query(F.data.startswith("wo:del:"))
+async def workout_del(cb: CallbackQuery, profile) -> None:
+    wid = int(cb.data.split(":")[2])
+    w = await db.get_workout(wid)
+    await cb.answer("Удалено" if w else "Уже удалено")
+    if w:
+        await db.delete_workout(wid)
+        await cb.message.edit_text(f"❌ Тренировка удалена ({w['raw_kcal'] or w['kcal']:g} ккал с часов).\n\n"
+                                   + await budget.left_line(profile))
+        await panel.refresh(cb.bot, profile)
 
 
 @router.callback_query(F.data == "w:undo")
@@ -71,6 +112,12 @@ async def free_text(message: Message, state: FSMContext, profile) -> None:
         return await common.record_weight(message, profile, p.value)
     if p.kind == "kcal":
         return await common.record_kcal(message, profile, p.value, p.label, day)
+    if p.kind == "workout":
+        if not p.value:
+            await state.set_state(Workout.kcal)
+            await state.update_data(wo_label=p.label, wo_day=day)
+            return await message.answer(WORKOUT_ASK)
+        return await common.record_workout(message, profile, p.value, p.label, day)
     if p.kind == "steps":
         return await common.record_steps(message, profile, int(p.value))
     if p.kind == "ambiguous":

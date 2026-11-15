@@ -615,3 +615,56 @@ def test_evening_retries_after_failure(h):
         await reminders.morning_menu(h.bot, p, db.now().replace(hour=12, minute=30))
         assert h.out() == ""
     run(h, go)
+
+
+def test_workouts(h):
+    async def go():
+        await onboard(h)                                            # расход 2585, бюджет 1500
+        await h.say("1000 ккал")
+        out = await h.say("трен 700")
+        assert "в расход <b>595 ккал</b>" in out and "2 585 + 595 = <b>3 180 ккал</b>" in out
+        assert "дефицит 2 180 ккал" in out and h.llm_calls["n"] == 0
+        assert "тренировка +595 ккал к дефициту" in (await db.get_profile())["panel_text"]
+        # без цифры — спросить калории, а не отправлять в разбор еды
+        assert "Сколько калорий показали часы" in await h.say("зал")
+        out = await h.say("650")
+        assert "в расход <b>552 ккал</b>" in out and h.llm_calls["n"] == 0
+        out = await h.tap("r:1")
+        assert "расход 2 585 + тренировка 1 147 − съедено 1 000" in out and "дефицит 2 732" in out
+        # бюджет еды не меняется
+        assert (await db.get_profile())["budget"] == 1500
+        wid = (await db.workouts_on(db.today()))[-1]["id"]
+        assert "Тренировка удалена" in await h.tap(f"wo:del:{wid}")
+        assert await db.workout_kcal(db.today()) == 595
+        assert "Уже удалено" not in await h.tap(f"wo:del:{wid}")   # повторное нажатие не падает
+
+        # за вчера + отчёты
+        await db.add_meal([{"name": "еда", "grams": 0, "kcal": 1600, "protein": 100, "fat": 40, "carbs": 120}],
+                          "manual", "еда", db.days_ago(1))
+        assert "за вчера" in await h.say("вчера: бег 30 мин 400")
+        assert await db.workout_kcal(db.days_ago(1)) == 340
+        out = await h.tap("r:3")
+        assert "🏋️ 340" in out and "дефицит 1 325" in out          # 2585 + 340 − 1600
+        assert "Дефицит за полные дни: 1 325 ккал" in out
+        out = await h.tap("r:7")
+        assert "Тренировки: 2 дн." in out
+        out = await h.tap("ex:7")
+        assert any(type(c).__name__ == "SendDocument" for c in h.session.calls)
+        from bot.services import report
+        md = await report.build(await db.get_profile(), 7)
+        assert "| Тренировка |" in md and f"| {db.days_ago(1)} |" in md and "| 340 | +1325 |" in md
+    run(h, go)
+
+
+def test_real_tdee_subtracts_workouts(h):
+    async def go():
+        from bot.services import weekly
+        await onboard(h)
+        for i in range(14, 0, -1):
+            await db.add_meal([{"name": "еда", "grams": 0, "kcal": 2000, "protein": 100, "fat": 40, "carbs": 120}],
+                              "manual", "еда", db.days_ago(i))
+            await db.add_weight(92.0, db.days_ago(i))
+            await db.add_workout("зал", 500, 500, db.days_ago(i))
+        calc, why = await weekly.real_tdee(await db.get_profile())
+        assert calc == 1500 and "без тренировок" in why           # вес стоит: 2000 съедено = 1500 + 500
+    run(h, go)

@@ -77,6 +77,11 @@ async def init() -> None:
         await _db.execute("ALTER TABLE day_state ADD COLUMN remind_msg INTEGER")
     if "complete" not in cols:  # 1 — всё записано, -1 — не всё, 0 — не отмечено
         await _db.execute("ALTER TABLE day_state ADD COLUMN complete INTEGER DEFAULT 0")
+    cols = {r["name"] for r in await _all("PRAGMA table_info(activity)")}
+    if "kind" not in cols:  # steps — справочно, workout — входит в расход дня
+        await _db.execute("ALTER TABLE activity ADD COLUMN kind TEXT DEFAULT 'steps'")
+    if "raw_kcal" not in cols:  # цифра с часов до поправки
+        await _db.execute("ALTER TABLE activity ADD COLUMN raw_kcal REAL")
     await _db.commit()
 
 
@@ -364,25 +369,43 @@ async def save_menu(day: str, data: dict) -> None:
 # ---------- активность ----------
 
 async def add_activity(descr: str, kcal: float) -> int:
-    return await _exec("INSERT INTO activity (date, ts, descr, kcal) VALUES (?,?,?,?)",
+    """Шаги: только справочно, в расход не входят (они уже в коэффициенте активности)."""
+    return await _exec("INSERT INTO activity (date, ts, descr, kcal, kind) VALUES (?,?,?,?, 'steps')",
                        today(), now().isoformat(timespec="seconds"), descr, kcal)
 
 
 async def activity_kcal(day: str) -> float:
-    r = await _one("SELECT COALESCE(SUM(kcal),0) k FROM activity WHERE date = ?", day)
+    r = await _one("SELECT COALESCE(SUM(kcal),0) k FROM activity WHERE date = ? AND kind = 'steps'", day)
     return r["k"]
 
 
-async def avg_activity(since: str, until: str, days: int) -> float:
-    r = await _one("SELECT COALESCE(SUM(kcal),0) k FROM activity WHERE date >= ? AND date <= ?", since, until)
-    return r["k"] / max(1, days)
+async def add_workout(descr: str, raw_kcal: float, kcal: float, day: str | None = None) -> int:
+    return await _exec("INSERT INTO activity (date, ts, descr, kcal, kind, raw_kcal) VALUES (?,?,?,?, 'workout', ?)",
+                       day or today(), now().isoformat(timespec="seconds"), descr, kcal, raw_kcal)
 
 
-async def delete_last_activity() -> aiosqlite.Row | None:
-    r = await _one("SELECT * FROM activity ORDER BY id DESC LIMIT 1")
-    if r:
-        await _exec("DELETE FROM activity WHERE id = ?", r["id"])
-    return r
+async def get_workout(wid: int) -> aiosqlite.Row | None:
+    return await _one("SELECT * FROM activity WHERE id = ? AND kind = 'workout'", wid)
+
+
+async def delete_workout(wid: int) -> None:
+    await _exec("DELETE FROM activity WHERE id = ? AND kind = 'workout'", wid)
+
+
+async def workouts_on(day: str) -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM activity WHERE date = ? AND kind = 'workout' ORDER BY id", day)
+
+
+async def workout_kcal(day: str) -> float:
+    r = await _one("SELECT COALESCE(SUM(kcal),0) k FROM activity WHERE date = ? AND kind = 'workout'", day)
+    return r["k"]
+
+
+async def workouts_by_day(since: str, until: str) -> dict[str, float]:
+    """Учтённые калории тренировок по дням: дата -> ккал (дни без тренировок отсутствуют)."""
+    rows = await _all("SELECT date, SUM(kcal) k FROM activity WHERE kind = 'workout' AND date >= ? AND date <= ? "
+                      "GROUP BY date", since, until)
+    return {r["date"]: r["k"] for r in rows}
 
 
 # ---------- состояние дня ----------

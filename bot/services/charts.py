@@ -47,6 +47,7 @@ class ReportData:
     target: float
     today: date
     kpis: list[tuple[str, str, str]] = field(default_factory=list)  # (подпись, значение, пояснение)
+    workouts: dict[date, float] = field(default_factory=dict)       # дата -> учтённые ккал тренировки
 
 
 def _style(ax) -> None:
@@ -163,7 +164,8 @@ def report_chart(d: ReportData) -> bytes:
     cd = [x for x in d.days if x in d.kcal]
     if not cd:
         ax2.text(0.5, 0.5, "Записей еды за период нет", transform=ax2.transAxes, color=MUTED, ha="center")
-    kmax = max([d.kcal[x][0] for x in cd] + [d.tdee, d.budget])
+    expense = [d.tdee + d.workouts.get(x, 0) for x in d.days]  # расход дня: база + тренировка
+    kmax = max([d.kcal[x][0] for x in cd] + expense + [d.budget])
     ax2.set_ylim(0, kmax * 1.14)
     ax2.set_xlim(xmin, xmax)
     colors, hatches = [], []
@@ -177,10 +179,20 @@ def report_chart(d: ReportData) -> bytes:
             colors.append(BLUE if k <= d.budget * 1.05 else OVER); hatches.append(None)
     width = 0.5 if span <= 14 else 0.62
     _rounded_bars(ax2, mdates.date2num(cd), [d.kcal[x][0] for x in cd], colors, width, hatches)
-    ax2.axhline(d.tdee, color=INK2, lw=1.1, zorder=4)
+    if d.workouts:
+        # ступенька: в дни тренировок расход выше
+        xs = mdates.date2num(d.days)
+        edges = [xmin] + [(a + b) / 2 for a, b in zip(xs, xs[1:])] + [xmax]
+        ax2.stairs(expense, edges, color=INK2, lw=1.1, zorder=4, baseline=None)
+        for x in d.workouts if span <= 14 else []:  # на длинном периоде подписи слипаются, ступенек достаточно
+            if x in d.days:
+                ax2.text(mdates.date2num(x), d.tdee + d.workouts[x] + kmax * 0.02, f"+{d.workouts[x]:,.0f}".replace(",", " "),
+                         color=INK2, fontsize=8.5, ha="center", va="bottom")
+    else:
+        ax2.axhline(d.tdee, color=INK2, lw=1.1, zorder=4)
     ax2.axhline(d.budget, color=INK, lw=1.3, ls=(0, (3, 3)), zorder=4)
     end = xmax
-    ax2.text(end, d.tdee, f"  расход {d.tdee:,.0f}".replace(",", " "), color=INK2, fontsize=9.5, va="center")
+    ax2.text(end, expense[-1], f"  расход {expense[-1]:,.0f}".replace(",", " "), color=INK2, fontsize=9.5, va="center")
     ax2.text(end, d.budget, f"  бюджет {d.budget:,.0f}".replace(",", " "), color=INK, fontsize=9.5, va="center")
     ax2.yaxis.set_major_locator(plt.MaxNLocator(4))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}".replace(",", " ")))

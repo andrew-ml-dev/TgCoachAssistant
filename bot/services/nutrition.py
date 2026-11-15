@@ -108,6 +108,16 @@ def forecast_date(current_trend: float, target: float, rate_per_week: float | No
     return today + timedelta(days=round((current_trend - target) / -rate_per_week * 7))
 
 
+# Часы (Polar, Huawei) считают тренировку вместе с базовым обменом за это время, а он уже есть в расходе;
+# пульсовые оценки к тому же склонны завышать. Поэтому в расход идёт 85% цифры с часов.
+# Остальную систематическую ошибку поправит адаптивный расход: он вычитает учтённые тренировки.
+WORKOUT_NET = 0.85
+
+
+def workout_net(raw_kcal: float) -> int:
+    return round(raw_kcal * WORKOUT_NET)
+
+
 def steps_kcal(steps: int, weight: float) -> int:
     return round(steps * 0.0005 * weight)
 

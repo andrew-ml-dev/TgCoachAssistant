@@ -34,6 +34,7 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
     reliable = {d["date"] for d in await db.counted_days(since, until, profile["budget"])}
     full = [d for d in logged if d["date"] in reliable and d["date"] != until]
     wrows = await db.weights(since)
+    wo = await db.workouts_by_day(since, until)
     if not logged and not wrows:
         return "За этот период пока нет ни записей еды, ни взвешиваний.", None
 
@@ -48,7 +49,7 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
             expected.append((d, round(base - cum / nutrition.KCAL_PER_KG, 2)))
             ds = d.isoformat()
             if ds in reliable and ds != until:
-                cum += profile["tdee"] - kcal_by[ds]
+                cum += profile["tdee"] + wo.get(ds, 0) - kcal_by[ds]
 
     # плитки
     kpis = []
@@ -58,7 +59,7 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
                      f"{wrows[0]['trend']:.1f} → {wrows[-1]['trend']:.1f}"))
     elif wrows:
         kpis.append(("Вес", f"{wrows[-1]['weight']:.1f} кг", "нужно 2+ взвешивания"))
-    deficit = sum(profile["tdee"] - d["kcal"] for d in full)
+    deficit = sum(profile["tdee"] + wo.get(d["date"], 0) - d["kcal"] for d in full)
     if full:
         kpis.append(("Дефицит" if deficit >= 0 else "Профицит", fmt(abs(deficit)),
                      f"ккал ≈ {-deficit / nutrition.KCAL_PER_KG:+.1f} кг".replace("-", "−")))
@@ -79,7 +80,8 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
         weights={date.fromisoformat(r["date"]): (r["weight"], r["trend"]) for r in wrows},
         expected=expected if len(wrows) else [],
         kcal={date.fromisoformat(d["date"]): (d["kcal"], d["date"] in reliable) for d in logged},
-        budget=profile["budget"], tdee=profile["tdee"], target=profile["target_weight"], today=today, kpis=kpis)
+        budget=profile["budget"], tdee=profile["tdee"], target=profile["target_weight"], today=today, kpis=kpis,
+        workouts={date.fromisoformat(k): v for k, v in wo.items()})
     png = charts.report_chart(data)
 
     # подпись: то, чего нет на картинке
@@ -92,6 +94,8 @@ async def build(profile, days: int) -> tuple[str, bytes | None]:
         lines.append(f"🔥 В среднем {fmt(tot['kcal'] / k)} ккал при бюджете {fmt(profile['budget'])} · "
                      f"в бюджете {ok} из {k} дн.")
         lines.append(f"Б {fmt(tot['protein'] / k)} · Ж {fmt(tot['fat'] / k)} · У {fmt(tot['carbs'] / k)} г в день")
+    if wo:
+        lines.append(f"🏋️ Тренировки: {len(wo)} дн., {fmt(sum(wo.values()))} ккал — уже в дефиците и расходе на графике")
     if not days:
         last = await db.last_weight()
         if last:

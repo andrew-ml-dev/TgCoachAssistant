@@ -29,6 +29,9 @@ async def panel_text(profile) -> str:
         f"📌 {WD[d.weekday()]} {d.strftime('%d.%m')} · {head}",
         f"{nutrition.bar(pct)} {fmt(tot['kcal'])} / {fmt(profile['budget'])} · белок {fmt(tot['protein'])}/{profile['protein_goal']} г",
     ]
+    wo = await db.workout_kcal(day)
+    if wo:
+        lines.append(f"🏋️ тренировка +{fmt(wo)} ккал к дефициту")
     w = await db.weight_on(day)
     if w:
         week = await db.weight_before(db.days_ago(7))

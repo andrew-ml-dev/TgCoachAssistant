@@ -78,9 +78,13 @@ async def today_text(profile) -> str:
         f"🥩 Белок {fmt(tot['protein'])} / {profile['protein_goal']} г   "
         f"🧈 Жиры {fmt(tot['fat'])} г   🍞 Углеводы {fmt(tot['carbs'])} г",
     ]
-    bal = profile["tdee"] - eaten
-    lines.append(f"⚖️ Баланс сейчас: расход {fmt(profile['tdee'])} − съедено {fmt(eaten)} = "
+    wo = await db.workout_kcal(day)
+    bal = profile["tdee"] + wo - eaten
+    spent = f"расход {fmt(profile['tdee'])}" + (f" + тренировка {fmt(wo)}" if wo else "")
+    lines.append(f"⚖️ Баланс сейчас: {spent} − съедено {fmt(eaten)} = "
                  f"<b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>")
+    if wo:
+        lines.append("🏋️ Тренировка идёт в дефицит, бюджет еды я не увеличиваю — так быстрее к цели.")
     act = await db.activity_kcal(day)
     if act:
         lines.append(f"🏃 Шаги: ≈{fmt(act)} ккал (уже входят в расход, отдельно не прибавляю)")
@@ -116,6 +120,7 @@ async def period_text(profile, days: int) -> str:
 
     logged = await db.daily_kcal(since, until)
     reliable = {d["date"] for d in await db.counted_days(since, until, profile["budget"])}
+    wo = await db.workouts_by_day(since, until)
     if not logged:
         lines.append("За этот период записей еды нет.")
     if logged and n_days <= 7:
@@ -123,8 +128,9 @@ async def period_text(profile, days: int) -> str:
         for d in logged:
             dd = date.fromisoformat(d["date"])
             mark = "сегодня" if d["date"] == until else ("✅" if d["date"] in reliable else "⚠️ неполный")
-            lines.append(f"{WD[dd.weekday()]} {dd.strftime('%d.%m')} — {fmt(d['kcal'])} ккал · Б {fmt(d['protein'] or 0)} · "
-                         f"дефицит {fmt(profile['tdee'] - d['kcal'])} · {mark}")
+            gym = f" · 🏋️ {fmt(wo[d['date']])}" if d["date"] in wo else ""
+            lines.append(f"{WD[dd.weekday()]} {dd.strftime('%d.%m')} — {fmt(d['kcal'])} ккал · Б {fmt(d['protein'] or 0)}{gym} · "
+                         f"дефицит {fmt(profile['tdee'] + wo.get(d['date'], 0) - d['kcal'])} · {mark}")
         lines.append("")
 
     full = [d for d in logged if d["date"] in reliable and d["date"] != until]
@@ -134,7 +140,7 @@ async def period_text(profile, days: int) -> str:
         tot = await db.period_totals([d["date"] for d in full])
         k = len(full)
         ok = sum(1 for d in full if d["kcal"] <= profile["budget"] * 1.05)
-        deficit = sum(profile["tdee"] - d["kcal"] for d in full)
+        deficit = sum(profile["tdee"] + wo.get(d["date"], 0) - d["kcal"] for d in full)
         lines += [
             f"🔥 В среднем: <b>{fmt(tot['kcal'] / k)} ккал</b> при бюджете {fmt(profile['budget'])}",
             f"🥩 Б {fmt(tot['protein'] / k)} / {profile['protein_goal']} г · Ж {fmt(tot['fat'] / k)} г · "
@@ -142,9 +148,8 @@ async def period_text(profile, days: int) -> str:
             f"✅ В бюджете: {ok} из {k} дн.",
             f"📉 Дефицит за полные дни: {fmt(deficit)} ккал ≈ {-deficit / nutrition.KCAL_PER_KG:+.1f} кг",
         ]
-    act = await db.avg_activity(since, until, 1)
-    if act:
-        lines.append(f"🏃 Шаги за период: ≈{fmt(act)} ккал")
+    if wo:
+        lines.append(f"🏋️ Тренировки: {len(wo)} дн., {fmt(sum(wo.values()))} ккал (уже в дефиците)")
     ws = await db.weights(since)
     if len(ws) >= 2:
         lines.append(f"⚖️ Вес по тренду: {ws[0]['trend']:.1f} → <b>{ws[-1]['trend']:.1f}</b> "
@@ -171,4 +176,10 @@ async def pace_text(profile) -> str:
             f"(≈{round(extra / 4.5)} минут быстрой ходьбы).")
     else:
         lines.append(f"Темп: <b>{profile['pace']:g} кг/нед</b> (дефицит {fmt(b.wanted_deficit)} ккал/день)")
+    wo = await db.workouts_by_day(db.days_ago(14), db.days_ago(1))
+    if wo:
+        n = max(1, min(14, (db.now().date() - date.fromisoformat(profile["created"][:10])).days))
+        avg = sum(wo.values()) / n
+        real = max(0.0, profile["tdee"] + avg - profile["budget"]) * 7 / nutrition.KCAL_PER_KG
+        lines.append(f"🏋️ С тренировками (в среднем +{fmt(avg)} ккал/день) темп ≈ <b>{real:.1f} кг/нед</b>")
     return "\n".join(lines)

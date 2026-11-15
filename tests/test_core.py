@@ -84,3 +84,14 @@ def test_classify():
 def test_helpers():
     assert normalize("  Борщ   И Хлеб. ") == "борщ и хлеб"
     assert parse_time("7:30") == "07:30" and parse_time("8") == "08:00" and parse_time("25:00") is None
+
+
+def test_classify_workout():
+    for text, val, label in (("трен 700", 700, "трен"), ("зал + дорожка 650 ккал", 650, "зал + дорожка"),
+                             ("бег 30 мин 400", 400, "бег 30 мин"), ("700 тренировка", 700, "тренировка"),
+                             ("силовая 1 час 520", 520, "силовая 1 час")):
+        c = classify(text)
+        assert (c.kind, c.value, c.label) == ("workout", val, label)
+    assert (classify("зал").kind, classify("зал").value) == ("workout", 0)
+    assert classify("обед 700 ккал").kind == "kcal"
+    assert classify("гречка 200 г").kind == "food"

@@ -30,10 +30,14 @@ async def real_tdee(profile) -> tuple[int | None, str]:
         return None, (f"Для расчёта реального расхода нужно за последние 14 дней: 10 полностью записанных дней "
                       f"(есть {len(days)}) и 7 взвешиваний с разбросом от 10 дней (есть {len(pts)}, {span} дн.).")
     avg = sum(d["kcal"] for d in days) / len(days)
+    wo = await db.workouts_by_day(since, until)
+    avg_wo = sum(wo.get(d["date"], 0) for d in days) / len(days)
     slope = nutrition.slope_per_day(pts)
-    calc = nutrition.adaptive_tdee(avg, slope)
-    return calc, (f"В среднем съедено {fmt(avg)} ккал/день, вес менялся на {slope * 7:+.2f} кг/нед. "
-                  f"Отсюда реальный расход ≈ {fmt(calc)} ккал/день "
+    # вес = съедено − (расход без тренировок + тренировки), поэтому тренировки вычитаются
+    calc = nutrition.adaptive_tdee(avg - avg_wo, slope)
+    wo_txt = f", тренировки в среднем {fmt(avg_wo)} ккал/день" if avg_wo else ""
+    return calc, (f"В среднем съедено {fmt(avg)} ккал/день{wo_txt}, вес менялся на {slope * 7:+.2f} кг/нед. "
+                  f"Отсюда реальный расход без тренировок ≈ {fmt(calc)} ккал/день "
                   f"(в расчётах сейчас {fmt(profile['tdee'])}).")
 
 
@@ -56,9 +60,10 @@ async def build(profile) -> Weekly:
     else:
         lines.append("Полностью записанных дней за неделю нет." if logged else "Записей еды за неделю нет.")
 
-    act = await db.avg_activity(since, until, 7)
-    if act:
-        lines.append(f"🏃 Активность: в среднем +{fmt(act)} ккал/день")
+    wo = await db.workouts_by_day(since, until)
+    if wo:
+        lines.append(f"🏋️ Тренировки: {len(wo)} дн., всего {fmt(sum(wo.values()))} ккал "
+                     f"(в среднем +{fmt(sum(wo.values()) / 7)} ккал/день к расходу)")
 
     pts = await weight_points()
     last = await db.last_weight()

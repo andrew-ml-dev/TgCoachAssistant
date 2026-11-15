@@ -380,7 +380,7 @@ async def quick_screen(message: Message) -> None:
             "• 📦 ваши продукты с цифрами с этикетки — выбрать и ввести вес;\n"
             "• 🕘 то, что вы уже записывали, — повтор в одно нажатие.\n\n"
             "Пока пусто: запишите еду текстом или добавьте продукт с упаковки.",
-            reply_markup=kb.ikb([("➕ Новый продукт", "pr:add")]))
+            reply_markup=kb.ikb([("➕ Новый продукт", "pr:add")], [("🏋️ Тренировка — калории с часов", "wo:ask")]))
         return
     rows = [[(f"📦 {p['name'][:30]} · {p['kcal']:g}/100 г", f"pr:use:{p['id']}")] for p in prods]
     rows += [[(f"🕘 {m['raw_text'][:30]} · {fmt(m['kcal'])}", f"rep:{m['id']}")] for m in recent]
@@ -388,6 +388,7 @@ async def quick_screen(message: Message) -> None:
     if prods:
         last.append(("🗑 Удалить продукт", "pr:manage"))
     rows.append(last)
+    rows.append([("🏋️ Тренировка — калории с часов", "wo:ask")])
     hint = []
     if prods:
         hint.append("📦 — выбрать продукт и ввести вес")

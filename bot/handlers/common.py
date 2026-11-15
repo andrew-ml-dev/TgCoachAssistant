@@ -123,6 +123,27 @@ async def record_steps(message: Message, profile, steps: int) -> None:
                          "активность учитывается в реальном расходе, который я считаю по весу.")
 
 
+async def record_workout(message: Message, profile, raw: float, label: str = "", day: str | None = None) -> None:
+    """Калории тренировки с часов: идут в расход дня, бюджет еды не меняют."""
+    net = nutrition.workout_net(raw)
+    wid = await db.add_workout(label or "тренировка", raw, net, day)
+    day = day or db.today()
+    eaten = (await db.day_totals(day))["kcal"]
+    wo = await db.workout_kcal(day)
+    spent = profile["tdee"] + wo
+    bal = spent - eaten
+    when = "сегодня" if day == db.today() else "за вчера"
+    lines = [
+        f"🏋️ Тренировка {when}: {fmt(raw)} ккал с часов → в расход <b>{fmt(net)} ккал</b>",
+        f"<i>−15%: обычный расход за это время уже входит в {fmt(profile['tdee'])}, а часы его тоже считают.</i>",
+        f"Расход {when}: {fmt(profile['tdee'])} + {fmt(wo)} = <b>{fmt(spent)} ккал</b>",
+        f"Баланс: съедено {fmt(eaten)} → <b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>",
+        "Бюджет еды прежний: тренировка ускоряет похудение, а не даёт право съесть больше.",
+    ]
+    await message.answer("\n".join(lines), reply_markup=kb.ikb([("❌ Удалить", f"wo:del:{wid}")]))
+    await panel.refresh(message.bot, profile)
+
+
 async def today_markup():
     extra = [[("📋 Приёмы пищи", "t:meals")]]
     st = await db.day_state()

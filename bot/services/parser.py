@@ -8,12 +8,19 @@ NUM = r"(\d{1,4}(?:[.,]\d{1,2})?)"
 RE_WEIGHT = re.compile(rf"^(вес\s*)?{NUM}\s*(кг)?$", re.I)
 RE_KCAL_FIRST = re.compile(r"^(\d{1,4})\s*(?:ккал|kcal|кк|кал)\.?\s*(.*)$", re.I)
 RE_KCAL_LAST = re.compile(r"^(.+?)\s+(\d{1,4})\s*(?:ккал|kcal|кк|кал)\.?$", re.I)
+# Тренировка: ключевое слово + калории с часов. «трен 700», «зал + дорожка 650 ккал», «бег 30 мин 400», «700 тренировка»
+KW = r"(?:трен\w*|зал|бег|бегов\w*|дорожк\w*|кардио|силов\w*|сжё?г\w*|сжег\w*|сожг\w*|workout|gym)\b"
+UNIT = r"(?:ккал|kcal|кк|кал)?\.?"
+MID = r"(?:[^\d]|\d{1,3}(?:[.,]\d+)?\s*(?:мин\w*|км|ч|час\w*)\b)*?"  # «30 мин», «5 км», «1 час» не путать с ккал
+RE_WORKOUT = re.compile(rf"^({KW}{MID})[\s:=-]*(\d{{2,4}})\s*{UNIT}$", re.I)
+RE_WORKOUT_ONLY = re.compile(rf"^{KW}{MID}$", re.I)
+RE_WORKOUT_LAST = re.compile(rf"^(\d{{2,4}})\s*{UNIT}\s+({KW}.*)$", re.I)
 RE_STEPS = re.compile(r"^(?:шаги?\s*)?(\d[\d\s]{2,6})\s*(?:шаг\w*)?$", re.I)
 
 
 @dataclass
 class Parsed:
-    kind: str            # weight | kcal | steps | ambiguous | food
+    kind: str            # weight | kcal | steps | workout | ambiguous | food
     value: float = 0
     label: str = ""
 
@@ -30,6 +37,15 @@ def classify(text: str, last_weight: float | None = None) -> Parsed:
         m = RE_STEPS.match(low)
         if m:
             return Parsed("steps", int(m.group(1).replace(" ", "")))
+
+    m = RE_WORKOUT.match(t)
+    if m and 30 <= int(m.group(2)) <= 3000:
+        return Parsed("workout", int(m.group(2)), m.group(1).strip(" :=-+,"))
+    m = RE_WORKOUT_LAST.match(t)
+    if m and 30 <= int(m.group(1)) <= 3000:
+        return Parsed("workout", int(m.group(1)), m.group(2).strip())
+    if RE_WORKOUT_ONLY.match(t) and len(t) <= 40:
+        return Parsed("workout", 0, t)  # без цифры — спросить калории, а не отправлять в разбор еды
 
     m = RE_KCAL_FIRST.match(t)
     if m:

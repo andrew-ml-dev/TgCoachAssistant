@@ -33,9 +33,9 @@ class Settings(StatesGroup):
 
 ACTIVITY_KB = ikb(
     [("🪑 Сидячая работа, мало движения", "onb:act:1.2")],
-    [("🚶 Лёгкая активность, 1–3 тренировки", "onb:act:1.375")],
-    [("🏃 Средняя, 3–5 тренировок", "onb:act:1.55")],
-    [("🏋️ Высокая, физический труд", "onb:act:1.725")],
+    [("🚶 Много хожу в течение дня", "onb:act:1.375")],
+    [("🧍 Работа на ногах", "onb:act:1.55")],
+    [("🏗 Тяжёлый физический труд", "onb:act:1.725")],
 )
 PACE_KB = ikb(
     [("0.5 кг/нед", "pace:0.5"), ("1 кг/нед", "pace:1")],
@@ -130,7 +130,9 @@ async def got_target(message: Message, state: FSMContext) -> None:
         return await message.answer("Целевой вес должен быть числом меньше текущего, например 80.")
     await state.update_data(target=v)
     await state.set_state(Onb.activity)
-    await message.answer("Уровень активности?", reply_markup=ACTIVITY_KB)
+    await message.answer("Активность в обычный день, <b>без тренировок</b>? Тренировки записываются отдельно "
+                         "калориями с часов (<code>трен 650</code>) и прибавляются к расходу в тот день.",
+                         reply_markup=ACTIVITY_KB)
 
 
 @router.callback_query(Onb.activity, F.data.startswith("onb:act:"))
