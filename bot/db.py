@@ -56,6 +56,8 @@ PROFILE_EXTRA = {
     "shake_product": "TEXT DEFAULT ''",
     "panel_msg": "INTEGER",
     "panel_text": "TEXT DEFAULT ''",
+    "polar_token": "TEXT",
+    "polar_user": "INTEGER",
 }
 
 _db: aiosqlite.Connection | None = None
@@ -82,6 +84,9 @@ async def init() -> None:
         await _db.execute("ALTER TABLE activity ADD COLUMN kind TEXT DEFAULT 'steps'")
     if "raw_kcal" not in cols:  # цифра с часов до поправки
         await _db.execute("ALTER TABLE activity ADD COLUMN raw_kcal REAL")
+    for name in ("ext_id TEXT", "minutes INTEGER", "hr_avg INTEGER", "hr_max INTEGER"):  # импорт из Polar
+        if name.split()[0] not in cols:
+            await _db.execute(f"ALTER TABLE activity ADD COLUMN {name}")
     await _db.commit()
 
 
@@ -379,9 +384,21 @@ async def activity_kcal(day: str) -> float:
     return r["k"]
 
 
-async def add_workout(descr: str, raw_kcal: float, kcal: float, day: str | None = None) -> int:
-    return await _exec("INSERT INTO activity (date, ts, descr, kcal, kind, raw_kcal) VALUES (?,?,?,?, 'workout', ?)",
-                       day or today(), now().isoformat(timespec="seconds"), descr, kcal, raw_kcal)
+async def add_workout(descr: str, raw_kcal: float, kcal: float, day: str | None = None, ext_id: str | None = None,
+                      minutes: int | None = None, hr_avg: int | None = None, hr_max: int | None = None) -> int:
+    return await _exec(
+        "INSERT INTO activity (date, ts, descr, kcal, kind, raw_kcal, ext_id, minutes, hr_avg, hr_max) "
+        "VALUES (?,?,?,?, 'workout', ?,?,?,?,?)",
+        day or today(), now().isoformat(timespec="seconds"), descr, kcal, raw_kcal, ext_id, minutes, hr_avg, hr_max)
+
+
+async def known_ext_ids() -> set[str]:
+    return {r["ext_id"] for r in await _all("SELECT ext_id FROM activity WHERE ext_id IS NOT NULL")}
+
+
+async def workouts_between(since: str, until: str) -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM activity WHERE kind = 'workout' AND date >= ? AND date <= ? ORDER BY date, id",
+                      since, until)
 
 
 async def get_workout(wid: int) -> aiosqlite.Row | None:
@@ -389,6 +406,8 @@ async def get_workout(wid: int) -> aiosqlite.Row | None:
 
 
 async def delete_workout(wid: int) -> None:
+    # импортированную тренировку помечаем, а не удаляем — иначе следующий опрос Polar вернёт её снова
+    await _exec("UPDATE activity SET kind = 'deleted' WHERE id = ? AND kind = 'workout' AND ext_id IS NOT NULL", wid)
     await _exec("DELETE FROM activity WHERE id = ? AND kind = 'workout'", wid)
 
 

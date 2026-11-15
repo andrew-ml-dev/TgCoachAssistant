@@ -95,3 +95,15 @@ def test_classify_workout():
     assert (classify("зал").kind, classify("зал").value) == ("workout", 0)
     assert classify("обед 700 ккал").kind == "kcal"
     assert classify("гречка 200 г").kind == "food"
+
+
+def test_polar_parsing():
+    from bot.services import polar
+    assert polar.extract_code("http://localhost:5000/oauth2_callback?code=Ab-12_x&state=1") == "Ab-12_x"
+    assert polar.extract_code("Ab12cdEF") == "Ab12cdEF"
+    assert polar.extract_code("привет как дела") is None
+    assert polar._minutes("PT1H2M40S") == 63 and polar._minutes("PT45M") == 45 and polar._minutes(None) == 0
+    e = polar.parse({"id": 7, "start_time": "2026-11-15T18:00:00", "duration": "PT40M", "calories": 420,
+                     "sport": "RUNNING", "detailed_sport_info": "TREADMILL_RUNNING"})
+    assert (e.id, e.date, e.title, e.kcal, e.hr_avg) == ("7", "2026-11-15", "бег на дорожке 40 мин", 420, None)
+    assert polar.parse({"id": 8, "calories": 0}) is None

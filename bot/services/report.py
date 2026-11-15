@@ -80,6 +80,16 @@ async def build(profile, days: int) -> str:
                     if tot["n"] else f"нет записей | | | | {gym} | | |")
         d += timedelta(days=1)
 
+    ws = await db.workouts_between(since, until)
+    if ws:
+        out += ["", "## Тренировки", ""]
+        for w in ws:
+            extra = ", ".join(x for x in (f"{w['minutes']} мин" if w["minutes"] else "",
+                                          f"пульс ср. {w['hr_avg']} / макс. {w['hr_max']}" if w["hr_avg"] else "",
+                                          "Polar Flow" if w["ext_id"] else "вручную") if x)
+            out.append(f"- {w['date']}: {w['descr']} — {fmt(w['raw_kcal'] or w['kcal'])} ккал с часов, "
+                       f"в расход {fmt(w['kcal'])} ({extra})")
+
     out += ["", "## Что ел", ""]
     d = date.fromisoformat(since)
     while d <= today:

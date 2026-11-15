@@ -92,6 +92,8 @@ async def tick(bot: Bot) -> None:
     now = db.now()
     hm = now.strftime("%H:%M")
     await panel.refresh(bot, profile)  # удаления, правки, новый день, новый бюджет
+    from ..handlers import polar
+    await polar.sync(bot, profile)     # сам решает, пора ли (раз в 15 минут)
     await weight_reminder(bot, profile, now)
     await morning_menu(bot, profile, now)
     if "21:00" <= hm < "22:30":

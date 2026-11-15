@@ -13,7 +13,7 @@ from aiogram.methods import DeleteMessage, EditMessageMedia, EditMessageText, Se
 from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
 
 from bot import config, db
-from bot.handlers import diet, food, menu, misc, onboarding
+from bot.handlers import diet, food, menu, misc, onboarding, polar
 from bot.main import Access
 from bot.services import llm, reminders
 
@@ -53,7 +53,8 @@ class Harness:
 
     @staticmethod
     def _fresh_routers():
-        rs = [onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, misc.router]
+        rs = [onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router,
+              misc.router]
         for r in rs:
             r._parent_router = None
         return rs
@@ -667,4 +668,71 @@ def test_real_tdee_subtracts_workouts(h):
             await db.add_workout("зал", 500, 500, db.days_ago(i))
         calc, why = await weekly.real_tdee(await db.get_profile())
         assert calc == 1500 and "без тренировок" in why           # вес стоит: 2000 съедено = 1500 + 500
+    run(h, go)
+
+
+def test_polar_import(h, monkeypatch):
+    from bot.services import polar as ps
+    monkeypatch.setattr(ps, "configured", lambda: True)
+    monkeypatch.setattr(polar, "_last_sync", None)
+    feed = {"items": [], "auth_fail": False}
+
+    async def fake_connect(code):
+        assert code == "abc123"
+        return "TOKEN", 42
+
+    async def fake_exercises(token):
+        if feed["auth_fail"]:
+            raise ps.PolarAuthError("x")
+        return [ps.parse(e) for e in feed["items"]]
+
+    monkeypatch.setattr(ps, "connect", fake_connect)
+    monkeypatch.setattr(ps, "exercises", fake_exercises)
+
+    async def go():
+        await onboard(h)
+        out = await h.say("/polar")
+        assert "подключить Polar" in out and "localhost" in out
+        nonce = (await h.dp.fsm.get_context(h.bot, UID, UID).get_data())["polar_state"]
+        assert "старой ссылки" in await h.say("http://localhost:5000/oauth2_callback?code=abc123&state=zzz")
+        out = await h.say(f"http://localhost:5000/oauth2_callback?code=abc123&state={nonce}")
+        assert "Polar Flow подключён" in out
+        assert (await db.get_profile())["polar_token"] == "TOKEN"
+
+        # ручная запись, затем та же тренировка приходит из Polar
+        await h.say("трен 650")
+        feed["items"] = [{"id": "E1", "start_time": f"{db.today()}T18:00:00", "duration": "PT58M12S",
+                          "calories": 640, "sport": "STRENGTH_TRAINING", "heart_rate": {"average": 128, "maximum": 165}}]
+        p = await db.get_profile()
+        assert await polar.sync(h.bot, p) is None                     # 15 минут с прошлого опроса не прошло
+        h.session.calls.clear()
+        assert await polar.sync(h.bot, p, force=True) == 1
+        out = h.out()
+        assert "Из Polar: силовая 58 мин" in out and "пульс 128/165" in out and "в расход <b>544 ккал</b>" in out
+        assert "Это та же тренировка?" in out
+        ws = await db.workouts_on(db.today())
+        manual, imported = ws[0]["id"], ws[1]["id"]
+        await h.tap(f"pl:dup:{manual}:{imported}")
+        assert await db.workout_kcal(db.today()) == 544
+
+        # повторный опрос не дублирует; удалённая импортированная не возвращается
+        assert await polar.sync(h.bot, p, force=True) == 0
+        await h.tap(f"wo:del:{imported}")
+        assert await polar.sync(h.bot, p, force=True) == 0
+        assert await db.workout_kcal(db.today()) == 0
+
+        # тренировки до начала наблюдения не импортируются
+        feed["items"].append({"id": "OLD", "start_time": "2020-01-01T10:00:00", "duration": "PT30M", "calories": 300})
+        assert await polar.sync(h.bot, p, force=True) == 0
+
+        from bot.services import report
+        assert "## Тренировки" not in await report.build(p, 7)    # удалённые в экспорт не попадают
+        await h.say("бег 30 мин 400")
+        assert "вручную" in await report.build(p, 7)
+
+        # доступ отозван — токен сброшен, пользователь предупреждён
+        feed["auth_fail"] = True
+        h.session.calls.clear()
+        assert await polar.sync(h.bot, p, force=True) is None
+        assert "отозвал доступ" in h.out() and (await db.get_profile())["polar_token"] is None
     run(h, go)

@@ -19,3 +19,6 @@ MONTHLY_LLM_BUDGET = float(os.getenv("MONTHLY_LLM_BUDGET", "2.0"))
 TZ = ZoneInfo(os.getenv("TZ_NAME", "Europe/Warsaw"))
 DB_PATH = Path(os.getenv("DB_PATH", str(ROOT / "data" / "bot.db")))
 BACKUP_DIR = DB_PATH.parent / "backups"
+# Polar AccessLink (импорт тренировок). Клиент создаётся на admin.polaraccesslink.com
+POLAR_CLIENT_ID = os.getenv("POLAR_CLIENT_ID", "")
+POLAR_CLIENT_SECRET = os.getenv("POLAR_CLIENT_SECRET", "")

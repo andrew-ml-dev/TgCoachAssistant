@@ -8,7 +8,7 @@ from aiogram.types import BotCommand, CallbackQuery, Message
 
 from . import config, db
 from . import keyboards as kb
-from .handlers import diet, food, menu, misc, onboarding
+from .handlers import diet, food, menu, misc, onboarding, polar
 from .services import reminders
 
 log = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ async def main() -> None:
     dp.message.middleware(Access())
     dp.callback_query.middleware(Access())
     # Порядок важен: онбординг → меню и команды → настройки → состояния еды → свободный ввод
-    dp.include_routers(onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, misc.router)
+    dp.include_routers(onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router, misc.router)
 
     # Меню «/» — по частоте использования
     await bot.set_my_commands([
@@ -81,6 +81,7 @@ async def main() -> None:
         BotCommand(command="week", description="Итоги недели и пересчёт бюджета"),
         BotCommand(command="help", description="Как пользоваться"),
         BotCommand(command="cancel", description="Отменить текущий вопрос"),
+        BotCommand(command="polar", description="Тренировки из Polar Flow"),
         BotCommand(command="cost", description="Расход API"),
         BotCommand(command="export", description="Выгрузка в CSV"),
     ])

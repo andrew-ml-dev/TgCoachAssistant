@@ -49,7 +49,8 @@ weight_remind = ikb([("⏰ Отложить на час", "w:snooze"), ("🚫 С
 
 more_menu = ikb(
     [("🎯 Цель", "s:goal"), ("⏰ Напоминания", "s:remind")],
-    [("🥗 Диета и протеин", "s:diet"), ("🛠 Сервис", "s:service")],
+    [("🥗 Диета и протеин", "s:diet"), ("⌚ Polar", "s:polar")],
+    [("🛠 Сервис", "s:service")],
 )
 
 service_menu = ikb(
