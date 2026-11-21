@@ -191,6 +191,10 @@ async def _sync(bot: Bot, profile, force: bool) -> int | None:
                                    hr_avg=e.hr_avg, hr_max=e.hr_max)
         added += 1
         text = card(e, net)
+        if not manual and e.date >= db.days_ago(1):
+            from .common import workout_budget_lines
+            eaten = (await db.day_totals(e.date))["kcal"]
+            text += "\n" + "\n".join(await workout_budget_lines(profile, e.date, eaten))
         if manual:
             m = manual[-1]
             text += (f"\n\nЗа этот день уже есть ручная запись: {m['descr']}, {fmt(m['raw_kcal'] or m['kcal'])} ккал. "

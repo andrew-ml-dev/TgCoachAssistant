@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from aiogram import Bot
 
 from .. import db, keyboards as kb
-from ..handlers import common, diet
-from . import budget, llm, panel
+from ..handlers import common
+from . import panel
 
 log = logging.getLogger(__name__)
 REPEAT_MIN = 30
@@ -53,38 +53,6 @@ async def weight_reminder(bot: Bot, profile, now: datetime) -> None:
     await db.set_day_state(last_weight_remind=now.isoformat(timespec="minutes"), remind_msg=msg.message_id)
 
 
-async def morning_menu(bot: Bot, profile, now: datetime) -> None:
-    """Меню приходит после взвешивания; если вес пропущен или не внесён до отсечки — после неё."""
-    if not profile["menu_enabled"] or now < _at(now, profile["wake_time"]) or now.hour >= 15:
-        return
-    if await db.was_sent("menu"):
-        return
-    st = await db.day_state()
-    weighed = await db.weight_on(db.today())
-    if not (weighed or st["weight_skipped"] or now > _cutoff(profile, now)):
-        return
-    try:
-        # send_menu сам ставит отметку после отправки; уже составленное меню при повторе не стоит денег
-        await diet.send_menu(bot, profile["chat_id"], profile)
-    except llm.LLMError as e:
-        await db.mark_sent("menu")  # не платим за повторные попытки каждую минуту
-        log.warning("Утреннее меню не составлено: %s", e)
-
-
-async def evening(bot: Bot, profile) -> None:
-    """Отметка ставится только после успешной отправки: при сбое итог придёт со следующей попытки."""
-    if await db.was_sent("evening"):
-        return
-    tot = await db.day_totals(db.today())
-    text = "🌙 <b>Итог дня</b>\n" + await budget.today_text(profile)
-    if tot["n"] and tot["protein"] < profile["protein_goal"] * 0.7:
-        text += "\n\n🥩 Белка сегодня мало. При дефиците он нужен, чтобы сохранять мышцы."
-    text += ("\n\n<b>Всё за день записано?</b> Если что-то забыли — допишите и нажмите «✅ Всё записал». "
-             "Неполные дни я не учитываю в расчёте расхода и прогнозе веса.")
-    await bot.send_message(profile["chat_id"], text, reply_markup=kb.day_done(db.today()))
-    await db.mark_sent("evening")
-
-
 async def tick(bot: Bot) -> None:
     profile = await db.get_profile()
     if not profile:
@@ -95,9 +63,6 @@ async def tick(bot: Bot) -> None:
     from ..handlers import polar
     await polar.sync(bot, profile)     # сам решает, пора ли (раз в 15 минут)
     await weight_reminder(bot, profile, now)
-    await morning_menu(bot, profile, now)
-    if "21:00" <= hm < "22:30":
-        await evening(bot, profile)
     if now.weekday() == 6 and "10:00" <= hm < "12:00" and not await db.was_sent("weekly"):
         await common.send_weekly(bot, profile["chat_id"], profile, with_review=True)
         await db.mark_sent("weekly")

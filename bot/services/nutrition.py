@@ -23,6 +23,28 @@ def protein_goal(target_weight: float) -> int:
     return round(target_weight * 2.0)
 
 
+def protein_min(target_weight: float) -> int:
+    """Нижняя граница: 1.6 г на кг целевого веса. Ниже при дефиците заметно растёт потеря мышц,
+    выше польза для мышц почти не прибавляется (мета-анализ Morton et al., 2018)."""
+    return round(target_weight * 1.6)
+
+
+def protein_bar(p: float, low: float, goal: float, width: int = 10) -> str:
+    """Шкала до цели с отметкой минимума: ▓▓▓▓░░░░┊░░"""
+    filled = min(width, round(p / goal * width)) if goal else 0
+    cells = ["▓"] * filled + ["░"] * (width - filled)
+    cells.insert(min(width, round(low / goal * width)), "┊")
+    return "".join(cells)
+
+
+def protein_state(p: float, low: float, goal: float) -> str:
+    if p < low:
+        return f"🔴 до минимума ещё <b>{round(low - p)} г</b>"
+    if p < goal:
+        return f"🟡 минимум есть, до цели {round(goal - p)} г"
+    return "✅ белок в норме"
+
+
 @dataclass
 class Budget:
     budget: int           # сколько есть в день
@@ -46,6 +68,18 @@ def make_budget(tdee: float, pace_kg_week: float, floor: int) -> Budget:
 def extra_activity_needed(tdee: float, budget: float, pace_kg_week: float) -> int:
     """Сколько ккал активности в день не хватает до желаемого темпа."""
     return max(0, round(pace_kg_week * KCAL_PER_KG / 7 - (tdee - budget)))
+
+
+def workout_bonus(tdee: float, budget: float, pace_kg_week: float, net: float) -> int:
+    """Сколько ккал тренировок дня добавить к бюджету еды.
+
+    Сначала тренировка добирает дефицит до выбранного темпа (когда бюджет упёрся в пол, его не хватает),
+    остальное — к еде, но к еде идёт не меньше половины: так тренировка всегда ощутима,
+    а половина остаётся запасом на ошибку часов.
+    """
+    if net <= 0:
+        return 0
+    return round(min(net, max(net * 0.5, net - extra_activity_needed(tdee, budget, pace_kg_week))))
 
 
 def compute_trends(points: list[tuple[date, float]]) -> list[float]:
@@ -116,10 +150,6 @@ WORKOUT_NET = 0.85
 
 def workout_net(raw_kcal: float) -> int:
     return round(raw_kcal * WORKOUT_NET)
-
-
-def steps_kcal(steps: int, weight: float) -> int:
-    return round(steps * 0.0005 * weight)
 
 
 def bar(pct: float, width: int = 10) -> str:

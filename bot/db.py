@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS meal_items (
     name TEXT, grams REAL, kcal REAL, protein REAL, fat REAL, carbs REAL
 );
 CREATE TABLE IF NOT EXISTS food_cache (key TEXT PRIMARY KEY, items TEXT);
-CREATE TABLE IF NOT EXISTS templates (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, items TEXT);
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ts TEXT, descr TEXT, kcal REAL
 );
@@ -38,8 +37,13 @@ CREATE TABLE IF NOT EXISTS day_state (
     last_weight_remind TEXT, warned INTEGER DEFAULT 0, sent TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS budget_history (date TEXT, tdee INTEGER, budget INTEGER);
-CREATE TABLE IF NOT EXISTS menus (date TEXT PRIMARY KEY, data TEXT);
-CREATE TABLE IF NOT EXISTS products (name TEXT PRIMARY KEY, kcal REAL, protein REAL, fat REAL, carbs REAL);
+CREATE TABLE IF NOT EXISTS usage (key TEXT, day TEXT, n INTEGER DEFAULT 0, PRIMARY KEY (key, day));
+CREATE TABLE IF NOT EXISTS diet_plan (id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, data TEXT);
+CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, kcal REAL, protein REAL, fat REAL, carbs REAL,
+    barcode TEXT, pack REAL, aliases TEXT DEFAULT '', source TEXT DEFAULT 'label', pinned INTEGER DEFAULT 1,
+    uses INTEGER DEFAULT 0, last_used TEXT
+);
 CREATE TABLE IF NOT EXISTS llm_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT,
     input_tokens INTEGER, output_tokens INTEGER, cost REAL
@@ -51,8 +55,6 @@ PROFILE_EXTRA = {
     "diet_prefs": "TEXT DEFAULT ''",
     "shake_servings": "INTEGER DEFAULT 1",
     "shake_protein": "REAL DEFAULT 24",
-    "menu_enabled": "INTEGER DEFAULT 1",
-    "diet_dislikes": "TEXT DEFAULT ''",
     "shake_product": "TEXT DEFAULT ''",
     "panel_msg": "INTEGER",
     "panel_text": "TEXT DEFAULT ''",
@@ -87,6 +89,29 @@ async def init() -> None:
     for name in ("ext_id TEXT", "minutes INTEGER", "hr_avg INTEGER", "hr_max INTEGER"):  # импорт из Polar
         if name.split()[0] not in cols:
             await _db.execute(f"ALTER TABLE activity ADD COLUMN {name}")
+    cols = {r["name"] for r in await _all("PRAGMA table_info(products)")}
+    for name in ("barcode TEXT", "pack REAL"):  # штрихкод и вес упаковки — из сканирования
+        if name.split()[0] not in cols:
+            await _db.execute(f"ALTER TABLE products ADD COLUMN {name}")
+    if "pinned" not in cols:
+        # «Мои продукты» → единая база продуктов: одно название может быть у разных упаковок (разные штрихкоды),
+        # поэтому ключ — id, а не название. rowid сохраняется: на него ссылаются кнопки.
+        await _db.executescript("""
+            CREATE TABLE products_new (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL, kcal REAL, protein REAL, fat REAL, carbs REAL,
+                barcode TEXT, pack REAL, aliases TEXT DEFAULT '', source TEXT DEFAULT 'label',
+                pinned INTEGER DEFAULT 1, uses INTEGER DEFAULT 0, last_used TEXT);
+            INSERT INTO products_new (id, name, kcal, protein, fat, carbs, barcode, pack, source)
+                SELECT rowid, name, kcal, protein, fat, carbs, barcode, pack,
+                       CASE WHEN barcode IS NULL THEN 'label' ELSE 'barcode' END FROM products;
+            DROP TABLE products;
+            ALTER TABLE products_new RENAME TO products;
+        """)
+        await backfill_foods()
+    # остатки удалённого меню на день: старые меню и шаблоны больше нигде не используются
+    await _db.execute("DROP TABLE IF EXISTS menus")
+    await _db.execute("DROP TABLE IF EXISTS templates")
+    await _db.execute("CREATE UNIQUE INDEX IF NOT EXISTS products_key ON products(name, COALESCE(barcode, ''))")
     await _db.commit()
 
 
@@ -156,6 +181,20 @@ async def set_budget(tdee: int, budget: int) -> None:
     await update_profile(tdee=tdee, budget=budget)
     await _exec("INSERT INTO budget_history VALUES (?, ?, ?)", today(), tdee, budget)
 
+
+
+async def eaten_items(days: int = 45) -> list[dict]:
+    """Позиции еды с граммами за последние дни — по ним видно, что человек ест и какими порциями."""
+    rows = await _all(
+        "SELECT mi.name, mi.grams, mi.kcal, mi.protein FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
+        "WHERE m.date >= ? AND mi.grams > 0 AND mi.kcal > 0 ORDER BY mi.id DESC", days_ago(days))
+    return [dict(r) for r in rows]
+
+
+async def budget_history() -> list[tuple[str, int, int]]:
+    """(дата, расход, бюджет) по порядку изменений; несколько за день — действует последнее."""
+    rows = await _all("SELECT date, tdee, budget FROM budget_history ORDER BY date, rowid")
+    return [(r["date"], r["tdee"], r["budget"]) for r in rows]
 
 
 # ---------- вес ----------
@@ -323,17 +362,72 @@ async def cache_del(key: str) -> None:
 
 
 async def products() -> list[dict]:
-    return [dict(r) for r in await _all("SELECT rowid AS id, * FROM products ORDER BY name")]
+    """«Мои продукты» — закреплённые (этикетка, штрихкод, вручную): кнопки быстрой записи, цифры для Claude."""
+    return [dict(r) for r in await _all("SELECT * FROM products WHERE pinned = 1 ORDER BY name")]
+
+
+async def foods() -> list[dict]:
+    """Вся база продуктов: закреплённые и выученные из записей."""
+    return [dict(r) for r in await _all("SELECT * FROM products ORDER BY pinned DESC, uses DESC, name")]
 
 
 async def get_product(pid: int) -> dict | None:
-    r = await _one("SELECT rowid AS id, * FROM products WHERE rowid = ?", pid)
+    r = await _one("SELECT * FROM products WHERE id = ?", pid)
     return dict(r) if r else None
 
 
-async def add_product(name: str, kcal: float, protein: float, fat: float, carbs: float) -> int:
-    return await _exec("INSERT OR REPLACE INTO products (name, kcal, protein, fat, carbs) VALUES (?,?,?,?,?)",
-                       name, kcal, protein, fat, carbs)
+async def add_product(name: str, kcal: float, protein: float, fat: float, carbs: float,
+                      barcode: str | None = None, pack: float | None = None, source: str = "label",
+                      pinned: int = 1, aliases: str | None = None) -> int:
+    """Добавить или обновить (ключ — название + штрихкод). Возвращает id."""
+    r = await _one("SELECT id FROM products WHERE name = ? AND COALESCE(barcode, '') = ?", name, barcode or "")
+    if r:
+        await _exec("UPDATE products SET kcal=?, protein=?, fat=?, carbs=?, pack=COALESCE(?, pack), source=?, "
+                    "pinned=MAX(pinned, ?), aliases=COALESCE(?, aliases) WHERE id=?",
+                    kcal, protein, fat, carbs, pack, source, pinned, aliases, r["id"])
+        return r["id"]
+    return await _exec(
+        "INSERT INTO products (name, kcal, protein, fat, carbs, barcode, pack, source, pinned, aliases) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", name, kcal, protein, fat, carbs, barcode, pack, source, pinned, aliases or "")
+
+
+async def update_product(pid: int, **f) -> None:
+    sets = ", ".join(f"{k} = ?" for k in f)
+    await _exec(f"UPDATE products SET {sets} WHERE id = ?", *f.values(), pid)
+
+
+async def touch_products(ids: list[int]) -> None:
+    for pid in set(ids):
+        await _db.execute("UPDATE products SET uses = uses + 1, last_used = ? WHERE id = ?",
+                          (now().isoformat(timespec="seconds"), pid))
+    await _db.commit()
+
+
+async def product_by_barcode(code: str) -> dict | None:
+    r = await _one("SELECT * FROM products WHERE barcode = ?", code)
+    return dict(r) if r else None
+
+
+async def backfill_foods() -> int:
+    """Один раз при переходе на базу: продукты из истории записей (медиана на 100 г), невидимые в быстрой записи."""
+    from statistics import median
+    from .services.parser import normalize
+    rows = await _all("SELECT mi.name, mi.grams, mi.kcal, mi.protein, mi.fat, mi.carbs, m.ts FROM meal_items mi "
+                      "JOIN meals m ON m.id = mi.meal_id WHERE mi.grams > 0 AND mi.kcal > 0 ORDER BY m.ts")
+    have = {r["name"] for r in await _all("SELECT name FROM products")}
+    by: dict[str, list] = {}
+    for r in rows:
+        n = normalize(r["name"])
+        if n and n not in have:
+            by.setdefault(n, []).append(r)
+    for n, items in by.items():
+        per = {k: round(median(i[k] / i["grams"] * 100 for i in items), 1) for k in ("kcal", "protein", "fat", "carbs")}
+        await _db.execute(
+            "INSERT INTO products (name, kcal, protein, fat, carbs, source, pinned, uses, last_used) "
+            "VALUES (?,?,?,?,?, 'history', 0, ?, ?)", (n, per["kcal"], per["protein"], per["fat"], per["carbs"],
+                                                      len(items), items[-1]["ts"]))
+    await _db.commit()
+    return len(by)
 
 
 async def recent_grams(name: str, limit: int = 3) -> list[float]:
@@ -347,42 +441,45 @@ async def recent_grams(name: str, limit: int = 3) -> list[float]:
 
 
 async def delete_product(pid: int) -> None:
-    await _exec("DELETE FROM products WHERE rowid = ?", pid)
+    await _exec("DELETE FROM products WHERE id = ?", pid)
 
 
-# ---------- меню на день ----------
+# ---------- частая еда ----------
 
 async def top_foods(limit: int = 15) -> list[str]:
     """Что пользователь сам чаще всего записывал за 30 дней (еда из меню не считается)."""
     rows = await _all(
         "SELECT mi.name, COUNT(*) c FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
-        "WHERE m.date >= ? AND mi.grams > 0 AND m.source IN ('llm', 'cache', 'repeat', 'template') "
+        "WHERE m.date >= ? AND mi.grams > 0 AND m.source IN ('llm', 'cache', 'repeat', 'base', 'db') "
         "GROUP BY mi.name HAVING c >= 2 ORDER BY c DESC LIMIT ?", days_ago(30), limit)
     return [r["name"] for r in rows]
 
 
 
-async def get_menu(day: str) -> dict | None:
-    r = await _one("SELECT data FROM menus WHERE date = ?", day)
-    return json.loads(r["data"]) if r else None
+async def eaten_rows(since: str) -> list[dict]:
+    """Все позиции еды с временем записи — сырьё для разбора рациона."""
+    rows = await _all(
+        "SELECT m.id meal_id, m.date, m.ts, m.source, mi.name, mi.grams, mi.kcal, mi.protein, mi.fat, mi.carbs "
+        "FROM meal_items mi JOIN meals m ON m.id = mi.meal_id WHERE m.date >= ? ORDER BY m.ts, mi.id", since)
+    return [dict(r) for r in rows]
 
 
-async def save_menu(day: str, data: dict) -> None:
-    await _exec("INSERT OR REPLACE INTO menus VALUES (?, ?)", day, json.dumps(data, ensure_ascii=False))
+async def save_plan(data: dict) -> int:
+    return await _exec("INSERT INTO diet_plan (created, data) VALUES (?, ?)",
+                       now().isoformat(timespec="seconds"), json.dumps(data, ensure_ascii=False))
+
+
+async def last_plan() -> dict | None:
+    r = await _one("SELECT id, created, data FROM diet_plan ORDER BY id DESC LIMIT 1")
+    return {"id": r["id"], "created": r["created"], **json.loads(r["data"])} if r else None
+
+
+async def get_plan(pid: int) -> dict | None:
+    r = await _one("SELECT id, created, data FROM diet_plan WHERE id = ?", pid)
+    return {"id": r["id"], "created": r["created"], **json.loads(r["data"])} if r else None
 
 
 # ---------- активность ----------
-
-async def add_activity(descr: str, kcal: float) -> int:
-    """Шаги: только справочно, в расход не входят (они уже в коэффициенте активности)."""
-    return await _exec("INSERT INTO activity (date, ts, descr, kcal, kind) VALUES (?,?,?,?, 'steps')",
-                       today(), now().isoformat(timespec="seconds"), descr, kcal)
-
-
-async def activity_kcal(day: str) -> float:
-    r = await _one("SELECT COALESCE(SUM(kcal),0) k FROM activity WHERE date = ? AND kind = 'steps'", day)
-    return r["k"]
-
 
 async def add_workout(descr: str, raw_kcal: float, kcal: float, day: str | None = None, ext_id: str | None = None,
                       minutes: int | None = None, hr_avg: int | None = None, hr_max: int | None = None) -> int:
@@ -476,10 +573,27 @@ async def mark_flag(name: str, value: str) -> bool:
 
 # ---------- расходы API ----------
 
-async def add_usage(kind: str, inp: int, out: int) -> None:
-    cost = inp * config.PRICE_IN / 1e6 + out * config.PRICE_OUT / 1e6
+async def add_usage(kind: str, inp: int, out: int, model: str | None = None) -> None:
+    pin, pout = config.PRICES.get(model or config.MODEL, (config.PRICE_IN, config.PRICE_OUT))
+    cost = inp * pin / 1e6 + out * pout / 1e6
     await _exec("INSERT INTO llm_usage (ts, kind, input_tokens, output_tokens, cost) VALUES (?,?,?,?,?)",
                 now().isoformat(timespec="seconds"), kind, inp, out, cost)
+
+
+async def count_use(key: str) -> None:
+    await _exec("INSERT INTO usage (key, day, n) VALUES (?, ?, 1) ON CONFLICT(key, day) DO UPDATE SET n = n + 1",
+                key, today())
+
+
+async def uses(days: int = 30) -> list[dict]:
+    rows = await _all("SELECT key, SUM(n) n FROM usage WHERE day >= ? GROUP BY key", days_ago(days))
+    return [dict(r) for r in rows]
+
+
+async def usage_by_kind() -> list[dict]:
+    rows = await _all("SELECT kind, COUNT(*) n, SUM(cost) cost FROM llm_usage WHERE ts LIKE ? GROUP BY kind "
+                      "ORDER BY cost DESC", today()[:7] + "%")
+    return [dict(r) for r in rows]
 
 
 async def usage_month() -> dict:

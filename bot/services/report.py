@@ -49,7 +49,6 @@ async def build(profile, days: int) -> str:
         f"цель по белку: {profile['protein_goal']} г/день",
         f"- Темп при текущем бюджете: ≈{b.achievable_pace:g} кг/нед (желаемый {profile['pace']:g})",
         f"- Предпочтения в еде: {profile['diet_prefs'] or 'не указаны'}",
-        f"- Не ест: {profile['diet_dislikes'] or 'не указано'}",
         f"- Протеин: {profile['shake_servings']} порц./день по {profile['shake_protein']:g} г белка",
         "",
         "Вес «тренд» — сглаженное значение без шума от воды. «День записан»: да — подтверждено, что записано всё; "

@@ -13,7 +13,7 @@ from aiogram.methods import DeleteMessage, EditMessageMedia, EditMessageText, Se
 from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
 
 from bot import config, db
-from bot.handlers import diet, food, menu, misc, onboarding, polar
+from bot.handlers import diet, food, inputs, menu, misc, onboarding, polar
 from bot.main import Access
 from bot.services import llm, reminders
 
@@ -54,7 +54,7 @@ class Harness:
     @staticmethod
     def _fresh_routers():
         rs = [onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router,
-              misc.router]
+              inputs.router, misc.router]
         for r in rs:
             r._parent_router = None
         return rs
@@ -107,22 +107,24 @@ def h(tmp_path, monkeypatch):
     async def fake_correct(items, correction):
         return llm.FoodParse(question="", items=[F(name="борщ", grams=500, kcal=300, protein=13, fat=12, carbs=33)])
 
-    async def fake_menu(**kw):
-        calls["menu"] = kw
-        return llm.DayMenu(tip="пейте воду", meals=[
-            llm.MenuMeal(title="Обед, 12:00", items=[F(name="омлет", grams=200, kcal=300, protein=22, fat=20, carbs=4),
-                                                     F(name="протеиновый коктейль", grams=30, kcal=120, protein=24, fat=2, carbs=3)]),
-            llm.MenuMeal(title="Ужин, 19:00", items=[F(name="курица с гречкой", grams=350, kcal=500, protein=50, fat=10, carbs=50)])])
-
-    async def fake_swap(title, kcal, protein, old, dislikes, prefs):
-        calls["swap"] = (title, kcal, protein, list(dislikes))
-        return llm.MenuMeal(title=title, items=[F(name="индейка с рисом", grams=350, kcal=490, protein=48, fat=9, carbs=52)])
+    async def fake_review(facts):
+        calls["review"] = facts
+        R = llm
+        return R.DietReview(summary="Ест мало овощей.", fixes=[
+            R.ReviewFix(problem="мало овощей", change="огурец 150 г к обеду", why="сытость", short="+ огурец к обеду")],
+            dishes=[R.ReviewDish(title="Пюре с котлетами и огурцом", slot="любое", from_history=True, items=[
+                R.ReviewItem(name="котлеты свиные", role="p", grams=150, lo=100, hi=200),
+                R.ReviewItem(name="картофельное пюре", role="c", grams=180, lo=0, hi=250),
+                R.ReviewItem(name="огурец", role="v", grams=150, lo=150, hi=150),
+                R.ReviewItem(name="выдуманный продукт", role="c", grams=100, lo=0, hi=200)]),
+                R.ReviewDish(title="Только пюре", slot="день", from_history=False, items=[
+                    R.ReviewItem(name="картофельное пюре", role="c", grams=200, lo=100, hi=300)])])
 
     async def fake_product(text):
         return llm.Product(ok="ккал" in text, name="Hi Tec Protein", kcal=380, protein=75, fat=6, carbs=8)
 
-    for name, fn in (("parse_food", fake_parse), ("correct_food", fake_correct), ("day_menu", fake_menu),
-                     ("replace_meal", fake_swap), ("parse_product", fake_product)):
+    for name, fn in (("parse_food", fake_parse), ("correct_food", fake_correct), ("diet_review", fake_review),
+                     ("parse_product", fake_product)):
         monkeypatch.setattr(llm, name, fn)
     loop = asyncio.new_event_loop()
     loop.run_until_complete(db.init())
@@ -156,7 +158,7 @@ def test_logging_food(h):
     async def go():
         out = await onboard(h)
         # темп 2 кг/нед недостижим: бюджет упирается в пол 1500, бот это говорит
-        assert "1 500 ккал/день" in out and "≈0.99 кг/нед" in out and "ни на что не влияет" in out
+        assert "1 500 ккал/день" in out and "≈0.99 кг/нед" in out and "Без тренировок темп" in out
         p = await db.get_profile()
         assert (p["tdee"], p["budget"], p["protein_goal"]) == (2585, 1500, 160)
         assert await h.say("91.5", user_id=999) == ""          # чужой пользователь игнорируется
@@ -193,7 +195,7 @@ def test_over_budget_edit_can_yesterday(h):
         assert "🔴" not in await h.say("1100 ккал")
         assert "🔴" not in await h.say("150 ккал")              # 83% — промежуточных предупреждений нет
         out = await h.say("400 ккал")                           # 110%
-        assert "🔴 Бюджет превышен на 150 ккал" in out and "Перебор: <b>+150 ккал</b>" in out
+        assert "🔴 Бюджет дня (1 500) превышен на 150 ккал" in out and "Перебор: <b>+150 ккал</b>" in out
         out = await h.say("10 ккал")
         assert "🔴" not in out and "Перебор" in out             # отдельное сообщение — один раз в день
         await h.say("/undo")
@@ -233,10 +235,10 @@ def test_over_budget_edit_can_yesterday(h):
 
         assert "вес или калории" in await h.say("92")
         assert "Записал: <b>92.0 кг</b>" in await h.tap("amb:w:92")
-        assert "8 000 шагов ≈ 368 ккал" in await h.say("8000 шагов")
+        assert "Шаги не записываю" in await h.say("8000 шагов")
         out = await h.say("📊 Сегодня")
-        assert "Вес утром: 92.0" in out and "• Борщ" in out
-        assert "Баланс сейчас: расход 2 585 − съедено" in out and "Шаги: ≈368" in out
+        assert "<b>Вес</b> 92.0 кг" in out and "Борщ" in out
+        assert "Расход за день" in out and "2 585" in out and "шаги" not in out
         # вчера записано 700 + 200 + 320 = 1220 (≥60% бюджета) — неотмеченный день считается
         out = await h.say("📈 Прогресс")                            # старая кнопка → отчёт «Всё»
         assert "переехал" in out and "полных (без сегодня): 1" in out and "SendPhoto" not in out
@@ -275,7 +277,7 @@ def test_products(h):
         out = await h.say("30")
         assert "hi tec protein 30 г — 114 ккал" in out and "по этикетке" in out
         out = await h.tap(f"pr:use:{pid}")
-        assert "прошлую порцию" in out                            # есть быстрая кнопка
+        assert "Или выберите" in out                               # есть быстрая кнопка
         assert await db.recent_grams("hi tec protein") == [30.0, 110.0]
         assert "114 ккал" in await h.tap(f"pr:g:{pid}:30")
         assert "Отправьте число" not in await h.say("📊 Сегодня")   # кнопка меню сбрасывает ввод веса
@@ -285,55 +287,9 @@ def test_products(h):
     run(h, go)
 
 
-def test_daily_menu_and_shake(h):
-    async def go():
-        await onboard(h)
-        p = await db.get_profile()
-        await h.tap("d:prefs")
-        assert "Запомнил" in await h.say("2 приёма пищи: 12:00 и 19:00")
-        await h.tap("d:sh:2")
-        p = await db.get_profile()
-        now = db.now().replace(hour=8, minute=0)
-
-        # меню приходит только после взвешивания (или после отсечки), один раз в день
-        await db.delete_weight(db.today())
-        h.session.calls.clear()
-        await reminders.morning_menu(h.bot, p, now)
-        assert h.out() == ""
-        await reminders.morning_menu(h.bot, p, now.replace(hour=12, minute=5))
-        out = h.out()
-        assert "Меню на сегодня" in out and "Итого: <b>920 ккал</b>" in out
-        kw = h.llm_calls["menu"]
-        assert (kw["kcal"], kw["protein"], kw["shakes"]) == (1500, 160, 2)
-        h.session.calls.clear()
-        await reminders.morning_menu(h.bot, p, now.replace(hour=12, minute=6))
-        assert h.out() == ""
-
-        # замена блюда: один вопрос, нелюбимое запоминается, коктейль остаётся
-        day = db.today()
-        v = (await db.get_menu(day))["v"]
-        assert "Что не так в «Ужин, 19:00»" in await h.tap(f"mn:sw:{day}:{v}:1")
-        out = await h.tap(f"mn:dl:{day}:{v}:1:0")
-        assert "индейка с рисом" in out and "курица с гречкой" not in out
-        assert h.llm_calls["swap"] == ("Ужин, 19:00", 500, 50, ["курица с гречкой"])
-        assert (await db.get_profile())["diet_dislikes"] == "курица с гречкой"
-
-        # «съел по плану» — без Claude и только один раз
-        out = await h.tap(f"mn:eat:{day}:{v}:0")
-        assert "Обед, 12:00 — 420 ккал" in out and "Осталось на сегодня: <b>1 080 ккал</b>" in out
-        await h.tap(f"mn:eat:{day}:{v}:0")
-        assert len(await db.meals_on(day)) == 1
-        assert "✅ <b>Обед, 12:00</b>" in await h.say("🥗 Меню")
-
-        await h.tap("d:toggle")
-        assert (await db.get_profile())["menu_enabled"] == 0
-    run(h, go)
-
-
 def test_reminders_and_weekly(h):
     async def go():
         await onboard(h)
-        await h.tap("d:toggle")                                 # меню выключено, чтобы не мешало
         p = await db.get_profile()
         await db.delete_weight(db.today())
         now = db.now().replace(hour=8, minute=0)
@@ -393,7 +349,7 @@ def test_goal_service_export_shake_pick(h):
     async def go():
         await onboard(h)
         out = await h.tap("s:goal")
-        assert "ни на что не влияет" in out
+        assert "Без тренировок темп" in out
         await h.tap("g:target")
         out = await h.say("85")
         assert "Цель: 85 кг" in out and (await db.get_profile())["protein_goal"] == 170
@@ -421,11 +377,6 @@ def test_goal_service_export_shake_pick(h):
         assert "## Задание" in text and "## По дням" in text and "творог" in text
         assert "| " + db.today() + " | 91.0 |" in text and "kfd pure wpc" in text
         assert h.llm_calls["n"] == n
-
-        # вечерний итог спрашивает, всё ли записано
-        h.session.calls.clear()
-        await reminders.evening(h.bot, await db.get_profile())
-        assert "Всё за день записано?" in h.out()
     run(h, go)
 
 
@@ -444,10 +395,11 @@ def test_report_periods(h):
 
         out = await h.tap("r:3")
         assert "<b>Отчёт: 3 дн.</b>" in out
-        assert "1 400 ккал" in out and "✅" in out and "⚠️ неполный" in out and "сегодня" in out
+        assert "1 400" in out and "✅" in out and "⚠️" in out and "⏳ сегодня" in out
         assert "Записано дней: 3 из 3, полных (без сегодня): 1" in out
-        assert "В среднем: <b>1 400 ккал</b>" in out and "Дефицит за полные дни: 1 185 ккал ≈ -0.2 кг" in out
-        assert "Вес по тренду: 92.0 →" in out
+        assert "1 400 / 1 500" in out and "1 185 ккал ≈ −0.2 кг" in out
+        assert "мин 128 · цель 160" in out and "Белок ≥ мин" in out
+        assert "Вес по тренду:</b> 92.0 →" in out
         from bot import keyboards as kb
         names = lambda: [type(c).__name__ for c in h.session.calls]
         # из текстового отчёта на «Всё»: текст нельзя превратить в фото — удалить и прислать фото
@@ -455,10 +407,10 @@ def test_report_periods(h):
         assert "<b>Всё наблюдение</b>" in out and names()[1:] == ["DeleteMessage", "SendPhoto"]
         # фото → фото: правится на месте
         out = await h.tap("r:7", markup=kb.report_menu("r:0"), photo=True)
-        assert "<b>Неделя</b>" in out and names()[1:] == ["EditMessageMedia"]
+        assert "неделя</b>" in out and names()[1:] == ["EditMessageMedia"]
         # фото → сегодня (текст): пересоздаётся
         out = await h.tap("r:1", markup=kb.report_menu("r:7"), photo=True)
-        assert "Осталось" in out and names()[1:] == ["DeleteMessage", "SendMessage"]
+        assert "осталось" in out and names()[1:] == ["DeleteMessage", "SendMessage"]
         # текст → текст: правится на месте
         await h.tap("r:3", markup=kb.report_menu("r:1"))
         assert names()[1:] == ["EditMessageText"]
@@ -536,14 +488,6 @@ def test_review_regressions(h):
             dbm.now = real_now
         assert any(b.callback_data == f"dc:1:{db.today()}" for row in markup.inline_keyboard for b in row)
 
-        # 5. кнопки старого меню после «Всё меню заново» не срабатывают
-        await h.say("/menu")
-        old_v = (await db.get_menu(db.today()))["v"]
-        await h.tap("mn:new")
-        n = len(await db.meals_on(db.today()))
-        out = await h.tap(f"mn:eat:{db.today()}:{old_v}:0")
-        assert len(await db.meals_on(db.today())) == n
-
         # 6. кнопки продуктов не сдвигаются при добавлении нового
         tid = await db.add_product("творог", 98, 17, 2, 3)
         await db.add_product("банан", 89, 1, 0, 23)                 # встаёт раньше по алфавиту
@@ -587,34 +531,20 @@ def test_all_chart_after_profile_redo(h):
 
 
 
-def test_evening_retries_after_failure(h):
+def test_yesterday_asked_with_weight(h):
     async def go():
         await onboard(h)
-        from aiogram.exceptions import TelegramNetworkError
-        from aiogram.methods import SendMessage
-        p = await db.get_profile()
-        real = h.session.make_request
-        async def failing(bot, method, timeout=None):
-            if isinstance(method, SendMessage) and "Итог дня" in method.text:
-                raise TelegramNetworkError(method=method, message="network down")
-            return await real(bot, method, timeout)
-        h.session.make_request = failing
-        with pytest.raises(TelegramNetworkError):
-            await reminders.evening(h.bot, p)
-        assert not await db.was_sent("evening")                   # отметки нет — будет повтор
-        h.session.make_request = real
-        h.session.calls.clear()
-        await reminders.evening(h.bot, p)
-        assert "Итог дня" in h.out() and await db.was_sent("evening")
-        h.session.calls.clear()
-        await reminders.evening(h.bot, p)
-        assert h.out() == ""                                       # второй раз не шлём
-
-        # меню, открытое вручную через /menu, утром повторно не приходит
-        await h.say("/menu")
-        h.session.calls.clear()
-        await reminders.morning_menu(h.bot, p, db.now().replace(hour=12, minute=30))
-        assert h.out() == ""
+        yday = db.days_ago(1)
+        await db.delete_weight(db.today())
+        await db.add_meal([{"name": "еда", "grams": 100, "kcal": 1300, "protein": 90, "fat": 0, "carbs": 0}],
+                          "manual", "еда", yday)
+        out = await h.say("91.5")
+        assert "Вчера</b>: 1 300 из 1 500 ккал, белок 90 г — ниже минимума 128" in out and "Всё записали?" in out
+        out = await h.tap(f"dc:-1:{yday}")
+        assert "вчера: пельмени 300 г" in out and (await db.day_state(yday))["complete"] == -1
+        assert "Вчера</b>" not in await h.say("91.4")                 # уже отмечено — не спрашиваем
+        await h.tap(f"dc:1:{yday}")
+        assert (await db.day_state(yday))["complete"] == 1
     run(h, go)
 
 
@@ -625,13 +555,13 @@ def test_workouts(h):
         out = await h.say("трен 700")
         assert "в расход <b>595 ккал</b>" in out and "2 585 + 595 = <b>3 180 ккал</b>" in out
         assert "дефицит 2 180 ккал" in out and h.llm_calls["n"] == 0
-        assert "тренировка +595 ккал к дефициту" in (await db.get_profile())["panel_text"]
+        assert "тренировка 595: +298 к еде, +297 к дефициту" in (await db.get_profile())["panel_text"]
         # без цифры — спросить калории, а не отправлять в разбор еды
         assert "Сколько калорий показали часы" in await h.say("зал")
         out = await h.say("650")
         assert "в расход <b>552 ккал</b>" in out and h.llm_calls["n"] == 0
         out = await h.tap("r:1")
-        assert "расход 2 585 + тренировка 1 147 − съедено 1 000" in out and "дефицит 2 732" in out
+        assert "Тренировки" in out and "+1 147" in out and "−1 000" in out and "2 732" in out
         # бюджет еды не меняется
         assert (await db.get_profile())["budget"] == 1500
         wid = (await db.workouts_on(db.today()))[-1]["id"]
@@ -645,8 +575,8 @@ def test_workouts(h):
         assert "за вчера" in await h.say("вчера: бег 30 мин 400")
         assert await db.workout_kcal(db.days_ago(1)) == 340
         out = await h.tap("r:3")
-        assert "🏋️ 340" in out and "дефицит 1 325" in out          # 2585 + 340 − 1600
-        assert "Дефицит за полные дни: 1 325 ккал" in out
+        assert "1 600 100↓  1 325" in out                       # 2585 + 340 − 1600
+        assert "Дефицит за полные дни:</b> 1 325 ккал" in out
         out = await h.tap("r:7")
         assert "Тренировки: 2 дн." in out
         out = await h.tap("ex:7")
@@ -771,7 +701,7 @@ def test_polar_extras(h, monkeypatch):
         assert await db.workout_kcal(db.today()) == 425
 
         out = await h.tap("r:1")
-        assert "aqua fitness 45 мин, пульс 120 → 425" in out
+        assert "aqua fitness 45 мин · ♥ 120 — <b>425</b>" in out
 
         # недельная сводка: тренировки против нужного для темпа
         lines = await weekly.workouts_summary(p, db.days_ago(6), db.today())
@@ -784,4 +714,521 @@ def test_polar_extras(h, monkeypatch):
         out = await h.say("84.5")
         assert "Обновите вес в Polar Flow" in out
         assert "Обновите вес в Polar Flow" not in await h.say("84.4")
+    run(h, go)
+
+
+async def send_media(h, **media):
+    from aiogram.types import Voice
+    h.n += 1
+    h.session.calls.clear()
+    if media.pop("voice", False):
+        media["voice"] = Voice(file_id="v", file_unique_id="v", duration=5)
+    if media.pop("photo", False):
+        media["photo"] = [PhotoSize(file_id="p", file_unique_id="p", width=1, height=1)]
+    msg = Message(message_id=h.n, date=datetime.now(), chat=h.chat, from_user=h.user, **media)
+    await h.dp.feed_update(h.bot, Update(update_id=h.n, message=msg))
+    return h.out()
+
+
+def test_voice(h, monkeypatch):
+    from bot.handlers import inputs
+    from bot.services import voice
+    V = llm.VoiceCommand
+    said = {}
+
+    async def fake_transcribe(data):
+        return said["text"]
+
+    async def fake_route(text, known=()):
+        return llm.VoiceParse(commands=said["cmds"])
+
+    async def fake_dl(message):
+        return b"x"
+
+    monkeypatch.setattr(voice, "transcribe", fake_transcribe)
+    monkeypatch.setattr(llm, "route_voice", fake_route)
+    monkeypatch.setattr(inputs, "_download", fake_dl)
+
+    async def go():
+        await onboard(h)
+        said.update(text="вес 91 и 4, съел тарелку борща", cmds=[
+            V(action="weight", text="", value=91.4, yesterday=False),
+            V(action="food", text="тарелка борща и 2 куска хлеба", value=0, yesterday=False)])
+        out = await send_media(h, voice=True)
+        assert "🎙 <i>вес 91 и 4" in out and "91.4 кг" in out and "борщ" in out
+        assert (await db.last_weight())["weight"] == 91.4
+
+        said.update(text="тренировка", cmds=[V(action="workout", text="бег", value=0, yesterday=False)])
+        assert "Сколько калорий" in await send_media(h, voice=True)
+        said["text"] = "650"                                     # ответ голосом на вопрос бота
+        out = await send_media(h, voice=True)
+        assert "650" in out and "Тренировка" in out or "тренировк" in out
+
+        said.update(text="бла", cmds=[V(action="unknown", text="Я записываю еду и тренировки.", value=0,
+                                         yesterday=False)])
+        assert "Я записываю еду" in await send_media(h, voice=True)
+    run(h, go)
+
+
+def test_voice_command_text():
+    from bot.handlers.inputs import command_text
+    V = llm.VoiceCommand
+    c = lambda a, t="", v=0, y=False: command_text(V(action=a, text=t, value=v, yesterday=y))
+    assert c("weight", v=91.4) == "вес 91.4" and c("weight", v=914) is None
+    assert c("workout", "бег 5 км 400 ккал", 400) == "тренировка бег 5 км 400 ккал"
+    assert c("workout", "зал") == "тренировка"
+    assert c("workout", "бег 30 минут", 380) == "тренировка бег 30 минут 380 ккал"
+    assert c("workout", "бег 380 ккал 1.5 час", 380) == "тренировка бег 1.5 час 380 ккал"
+    assert c("food", "пельмени 400 г", y=True) == "вчера: пельмени 400 г"
+    assert c("kcal", "обед", 700) == "700 ккал обед" 
+    assert c("can_eat", "шаурма") == "/can шаурма" and c("undo") == "/undo" and c("food") is None
+    from bot.services.parser import classify
+    assert classify(c("workout", "бег 5 км 400 ккал", 400)).kind == "workout"
+    assert classify(c("workout", "бег 5 км 400 ккал", 400)).value == 400
+
+
+def test_parse_off():
+    from bot.services.barcode import parse_off
+    p = parse_off({"product_name": "Twaróg półtłusty", "brands": "Piątnica,Other", "product_quantity": "250",
+                   "nutriments": {"energy-kcal_100g": 121, "proteins_100g": 18, "fat_100g": 4, "carbohydrates_100g": 3.5}})
+    assert p == {"name": "piątnica twaróg półtłusty", "kcal": 121, "protein": 18, "fat": 4, "carbs": 3.5, "pack": 250}
+    assert parse_off({"product_name": "x", "nutriments": {"energy_100g": 418.4}})["kcal"] == 100
+    assert parse_off({"product_name": "x", "nutriments": {}})["kcal"] is None
+
+
+def test_barcode_decode():
+    zxingcpp = pytest.importorskip("zxingcpp")
+    from io import BytesIO
+    from bot.services import barcode
+    img = zxingcpp.create_barcode("5901234123457", zxingcpp.BarcodeFormat.EAN13).to_image(scale=4)
+    from PIL import Image
+    buf = BytesIO()
+    Image.fromarray(__import__("numpy").asarray(img)).save(buf, "PNG") if not hasattr(img, "save") else img.save(buf, "PNG")
+    assert barcode._decode(buf.getvalue()) == "5901234123457"
+
+
+def test_scan(h, monkeypatch):
+    from bot.handlers import inputs
+    from bot.services import barcode
+    state = {"code": "5900000000001", "off": None, "n_lookup": 0}
+
+    async def fake_decode(data):
+        return state["code"]
+
+    async def fake_lookup(code):
+        state["n_lookup"] += 1
+        return state["off"]
+
+    async def fake_label(image, hint=""):
+        state["hint"] = hint
+        return llm.Label(ok=True, name="", kcal=120, protein=18, fat=4, carbs=3, pack=0)
+
+    async def fake_dl(message):
+        return b"x"
+
+    monkeypatch.setattr(barcode, "decode", fake_decode)
+    monkeypatch.setattr(barcode, "lookup", fake_lookup)
+    monkeypatch.setattr(llm, "parse_label", fake_label)
+    monkeypatch.setattr(inputs, "_download", fake_dl)
+
+    async def go():
+        await onboard(h)
+        state["off"] = {"name": "piątnica twaróg", "kcal": 121, "protein": 18, "fat": 4, "carbs": 3.5, "pack": 250}
+        out = await send_media(h, photo=True)
+        assert "Нашёл по штрихкоду" in out and "piątnica twaróg — на 100 г: 121 ккал" in out
+        assert "Вся упаковка · 250 г" in str(h.session.calls[-1].reply_markup)
+        out = await h.say("200")
+        assert "242 ккал" in out
+        out = await send_media(h, photo=True)                    # второй раз — из своих продуктов, без сети
+        assert "Уже есть" in out and state["n_lookup"] == 1
+        await h.say("/cancel")
+
+        # нет в базе → фото таблицы → запомнен со штрихкодом, имя из подсказки
+        state.update(code="4000000000002", off={"name": "skyr", "kcal": None, "protein": 0, "fat": 0, "carbs": 0,
+                                                "pack": None})
+        assert "без калорий" in await send_media(h, photo=True)
+        out = await send_media(h, photo=True)
+        assert state["hint"] == "skyr" and "Прочитал этикетку" in out
+        assert (await db.product_by_barcode("4000000000002"))["kcal"] == 120
+
+        # ни штрихкода, ни таблицы
+        state["code"] = None
+
+        async def no_label(image, hint=""):
+            return llm.Label(ok=False, name="", kcal=0, protein=0, fat=0, carbs=0, pack=0)
+        monkeypatch.setattr(llm, "parse_label", no_label)
+        await h.say("/cancel")
+        assert "ни штрихкода, ни таблицы" in await send_media(h, photo=True)
+    run(h, go)
+
+
+def test_steps(h):
+    async def go():
+        await onboard(h)
+        assert "Шаг 1/3" in await h.tap("st:go")
+        assert "Шаг 2/3" in await h.say("гречка")
+        assert "Шаг 3/3" in await h.tap("st:a:2")
+        out = await h.tap("st:c:0")
+        assert "гречка, большая порция, варёное или на пару" in out
+        await h.tap("st:more")
+        await h.say("котлета")
+        await h.say("2 штуки")
+        out = await h.tap("st:c:5")
+        assert "• котлета, 2 штуки" in out and "Пропустить" not in out.split("котлета")[1]
+        out = await h.tap("st:save")
+        assert "320 ккал" in out                                  # фиктивный разбор в фикстуре
+        assert "устарел" in await h.tap("st:save")
+    run(h, go)
+
+
+def test_workout_bonus_formula():
+    from bot.services.nutrition import workout_bonus
+    # темп 2 кг/нед, бюджет на полу: до темпа не хватает 1115 → к еде только половина
+    assert workout_bonus(2585, 1500, 2, 552) == 276
+    # реальный случай: расход 2296, темп 1, пол 1500 → не хватает 304, остальное к еде
+    assert workout_bonus(2296, 1500, 1, 992) == 688
+    # бюджет не на полу: дефицит темпа уже в бюджете → к еде вся тренировка
+    assert workout_bonus(2800, 1700, 1, 400) == 400
+    assert workout_bonus(2296, 1500, 1, 0) == 0
+
+
+def test_workout_raises_food_budget(h):
+    async def go():
+        await onboard(h)                                          # расход 2585, бюджет 1500, темп 2
+        await h.say("1000 ккал")
+        out = await h.say("трен 650")                             # 650 → 552 в расход, к еде +276
+        assert "1 500 + 276 за тренировку = 1 776" in out and "осталось <b>776</b>" in out
+        out = await h.say("700 ккал")                             # 1700 < 1776 — не перебор
+        assert "Осталось на сегодня: <b>76 ккал</b> (в бюджете +276 за тренировку)" in out and "🔴" not in out
+        out = await h.say("/today")
+        assert "съедено 1 700 из 1 776" in out and "к еде +276, остальные 276 — в дефицит" in out
+        out = await h.say("200 ккал")
+        assert "🔴 Бюджет дня (1 776 с тренировкой) превышен на 124 ккал" in out and "Дефицит дня всё равно есть" in out
+    run(h, go)
+
+
+def test_protein_tips(h):
+    from bot.services import budget
+    async def go():
+        await onboard(h)
+        await db.add_product("скир", 63, 12, 0, 3.8, pack=150)
+        await db.add_product("шоколад", 540, 6, 31, 57)            # белка мало — не предлагается
+        F = lambda n, g, k, p: {"name": n, "grams": g, "kcal": k, "protein": p, "fat": 0, "carbs": 0}
+        for g in (180, 200, 220):                                   # творог обычно ~200 г
+            await db.add_meal([F("творог", g, g * 1.2, g * 0.17)], "llm", "творог", db.days_ago(2))
+        await db.add_meal([F("макароны", 250, 400, 12)], "llm", "макароны", db.days_ago(2))
+        tip = await budget.protein_tips(40, 800)
+        assert tip.startswith("💡 добрать 40 г белка — на выбор: ")
+        assert "скир 225 г (142 ккал, +27 г)" in tip and "творог 235 г (282 ккал)" in tip
+        assert "шоколад" not in tip and "макароны" not in tip
+        await h.say("500 ккал")                                     # белка 0 → подсказка в отчёте
+        assert "💡 добрать" in await h.say("/today")
+    run(h, go)
+
+
+def test_reports_use_budget_history(h):
+    from bot.services import budget
+    async def go():
+        await onboard(h)                                            # план от сегодня: 2585 / 1500
+        await db._exec("UPDATE budget_history SET date = ?", db.days_ago(10))
+        await db._exec("INSERT INTO budget_history VALUES (?, ?, ?)", db.days_ago(3), 2400, 1500)
+        pl = await budget.plans(await db.get_profile(), db.days_ago(5), db.today())
+        assert pl[db.days_ago(5)] == (2585, 1500) and pl[db.days_ago(2)] == (2400, 1500)
+        await db.add_meal([{"name": "еда", "grams": 0, "kcal": 1400, "protein": 0, "fat": 0, "carbs": 0}],
+                          "manual", "еда", db.days_ago(2))
+        await db.set_day_state(db.days_ago(2), complete=1)
+        out = await h.tap("r:3")
+        assert "1 000 ккал ≈" in out                                # 2400 − 1400, а не 2585 − 1400
+    run(h, go)
+
+
+def test_base_foods_match():
+    from bot.services.base_foods import match
+    assert match("творог 200 г")["kcal"] == 242 and match("200 г творога")["grams"] == 200
+    assert match("2 яйца")["grams"] == 110 and match("яйца 3 шт")["grams"] == 165 and match("яйцо")["grams"] == 55
+    assert match("хлеб 2 куска")["grams"] == 60 and match("огурец")["grams"] == 120
+    assert match("гречка 250")["grams"] == 250 and match("Хлеб ржаной 30 г")["name"] == "хлеб ржаной"
+    assert match("сырники 200 г") is None and match("борщ") is None and match("творог") is None
+    assert match("творог с бананом") is None                       # сложное — к Claude
+
+
+def test_base_foods_flow(h):
+    async def go():
+        await onboard(h)
+        out = await h.say("2 яйца")
+        assert "по справочнику, без запроса к Claude" in out and "яйцо 110 г — 173 ккал" in out
+        assert h.llm_calls["n"] == 0
+        await h.tap("s:products")
+        assert "🥚 Базовые продукты" in str(h.session.calls[-1].reply_markup)
+        out = await h.tap("bf:1")                                    # творог 5%
+        assert "творог 5%" in out and "на 100 г: 121 ккал" in out
+        assert "242 ккал" in await h.say("200")
+        await h.tap("bf:0")
+        assert "яйцо 165 г" in await h.say("3 шт")
+        assert "яйцо 55 г" in await h.tap("bf:g:0:55")
+        await db.add_product("творог", 98, 17, 2, 3)                  # свой продукт важнее справочника
+        assert "по этикетке" in await h.say("творог 200 г")
+    run(h, go)
+
+
+def test_week_runs_cumulative():
+    from datetime import date, timedelta
+    from bot.services import charts
+    mon = date(2026, 11, 16)
+    days = [mon + timedelta(i) for i in range(7)]
+    d = charts.ReportData(title="", subtitle="", days=days, weights={}, expected=[],
+                          kcal={days[0]: (1500, True), days[1]: (800, False), days[2]: (1400, True),
+                                days[3]: (1200, True)},
+                          budget=1500, tdee=2300, target=82, today=days[3], target_deficit=1100,
+                          workouts={days[2]: 500})
+    r = charts.week_runs(d)[-1]
+    assert r["daily"] == {days[0]: 800, days[2]: 1400}
+    assert r["skipped"] == [days[1]]          # неполный день не идёт ни в дефицит, ни в цель
+    assert (r["cum"], r["tgt"], r["days"], r["left"]) == (2200, 2200, 2, 4)
+    assert r["proj"][-1][1] == 2200 + 4 * 1100
+
+
+def test_what_to_eat(h):
+    from bot.services import suggest
+
+    async def go():
+        await onboard(h)
+        await h.say("2 яйца")
+        out = await h.say("🍽 Что съесть?")
+        assert "Что съесть сейчас" in out and "Не хватает: белок" in out and "<b>1. " in out
+        assert h.llm_calls["n"] == 0
+        mk = h.session.calls[-1].reply_markup
+        picks = [b.callback_data for row in mk.inline_keyboard for b in row if b.callback_data.startswith("ws:")
+                 and not b.callback_data.startswith("ws:more")]
+        assert len(picks) == 3 and all(len(p.encode()) <= 64 for p in picks)
+        title, items = await suggest.decode(picks[0])
+        out = await h.tap(picks[0])
+        assert title in out and "по справочнику" in out
+        assert len(await db.meals_on(db.today())) == 2
+        assert "Другие" in str(mk)
+        assert "<b>4. " not in await h.tap("ws:more:3")
+
+    run(h, go)
+
+
+def test_suggest_portions():
+    from bot.services import suggest
+    prof = {"target_weight": 82, "protein_goal": 164}
+    # вечер, запас большой: приём не больше 700, белок в приоритете
+    nd = suggest.need(prof, {"kcal": 900, "protein": 95, "fat": 30}, 2188, 19)
+    assert nd.kcal == 700 and nd.capped and nd.meals_left == 1
+    for _, dish, items in suggest.options(nd, 19)[:3]:
+        assert sum(x["kcal"] for x in items) <= 700 * 1.15 + 30
+        assert sum(x["protein"] for x in items) >= 40
+    # утром — на один приём из трёх
+    assert suggest.need(prof, {"kcal": 0, "protein": 0, "fat": 0}, 1500, 8).kcal == 500
+    # названия собираются из того, что вошло
+    d = suggest.DISHES[7]
+    assert suggest.title(d, [{"name": "творог обезжиренный"}, {"name": "сметана 15%"}]) == "Обезжиренный творог со сметаной"
+
+
+async def _seed_meal(day, hhmm, items):
+    mid = await db.add_meal(items, "llm", "x", day)
+    await db._exec("UPDATE meals SET ts = ? WHERE id = ?", f"{day}T{hhmm}:00+01:00", mid)
+    return mid
+
+
+def _it(name, grams, kcal, p, f=0, c=0):
+    return {"name": name, "grams": grams, "kcal": kcal, "protein": p, "fat": f, "carbs": c}
+
+
+async def _seed_week(days=6):
+    for i in range(days, 0, -1):
+        d = db.days_ago(i)
+        await _seed_meal(d, "09:30", [_it("hi tec protein", 100, 378, 79, 4, 7)])
+        await _seed_meal(d, "13:20", [_it("картофельное пюре", 270, 300 if i % 2 else 470, 5, 10, 45)])
+        await _seed_meal(d, "13:22", [_it("котлеты свиные", 150, 420, 23, 33, 6)])
+        await _seed_meal(d, "19:00", [_it("куриная грудка", 150, 250, 40, 8, 0)])
+
+
+def test_diet_profile(h):
+    from bot.services import diet_profile
+
+    async def go():
+        await onboard(h)
+        await _seed_week()
+        data = await diet_profile.collect(await db.get_profile())
+        day = [s for s in data["sittings"] if s["date"] == db.days_ago(1)]
+        assert len(day) == 3                                  # пюре и котлеты за 2 минуты — один обед
+        assert {i["name"] for i in day[1]["items"]} == {"картофельное пюре", "котлеты свиные"}
+        foods = {f["name"]: f for f in data["foods"]}
+        assert foods["hi tec protein"]["powder"] and foods["картофельное пюре"]["grams"] == 270
+        assert data["meals"][0]["items"] == {"картофельное пюре": 270, "котлеты свиные": 150}
+        st = data["stats"]
+        assert st["full_days"] == 6 and st["sittings_per_day"] == 3 and st["veg_g"] == 0
+        flags = " ".join(data["flags"])
+        assert "порошок даёт" in flags and "овощей в среднем 0 г" in flags
+        assert "«картофельное пюре» записан с разной калорийностью" in flags
+    run(h, go)
+
+
+def test_diet_review_and_eat(h):
+    from bot.services import diet_review, suggest
+
+    async def go():
+        await onboard(h)
+        assert "нужно ещё 5 полн. дн." in await h.tap("s:review")       # данных мало — Claude не зовём
+        assert "review" not in h.llm_calls
+        await _seed_week()
+        out = await h.tap("s:review")
+        assert "Разбор рациона" in out and "огурец 150 г к обеду" in out and "⭐ Пюре с котлетами и огурцом" in out
+        facts = h.llm_calls["review"]
+        assert "ПЕРЕКОСЫ" in facts and "котлеты свиные: 6 раз" in facts and "картофельное пюре 270 г + котлеты свиные 150 г" in facts
+        plan = await db.last_plan()
+        assert [d["title"] for d in plan["dishes"]] == ["Пюре с котлетами и огурцом"]   # без белка — отброшено
+        names = [i["name"] for i in plan["dishes"][0]["items"]]
+        assert "выдуманный продукт" not in names
+        kot = next(i for i in plan["dishes"][0]["items"] if i["name"] == "котлеты свиные")
+        assert kot["kcal"] == 280                                       # цифры из записей, не от модели
+
+        # «Что съесть?» предлагает своё блюдо первым и записывает его одной кнопкой
+        out = await h.say("🍽 Что съесть?")
+        assert "📌 На этой неделе: + огурец к обеду" in out and "⭐ Пюре с котлетами и огурцом" in out
+        mk = h.session.calls[-1].reply_markup
+        wp = next(b.callback_data for row in mk.inline_keyboard for b in row if b.callback_data.startswith("wp:"))
+        assert len(wp.encode()) <= 64
+        out = await h.tap(wp)
+        assert "Пюре с котлетами и огурцом" in out and "котлеты свиные" in out
+        n = len(await db.meals_on(db.today()))
+        await h.tap("wp:999:0:0-100")                                   # кнопка от удалённого разбора
+        assert len(await db.meals_on(db.today())) == n
+        assert "Варианты устарели" in h.session.calls[-1].text
+
+        # воскресные итоги приходят вместе с разбором рациона
+        from bot.handlers import common
+        h.session.calls.clear()
+        await common.send_weekly(h.bot, UID, await db.get_profile(), with_review=True)
+        assert "Разбор рациона" in h.out()
+        assert "Меню на сегодня" not in await h.say("/menu")            # старое меню удалено
+    run(h, go)
+
+
+def test_foodbase_learns_and_reuses(h):
+    from bot.services import foodbase
+
+    async def go():
+        await onboard(h)
+        await h.say("борщ и 2 куска хлеба")                           # Claude: борщ 300 г / 180, хлеб 60 г / 140
+        rows = {r["name"]: r for r in await db.foods()}
+        assert rows["борщ"]["kcal"] == 60 and rows["борщ"]["pinned"] == 0 and rows["борщ"]["source"] == "claude"
+        assert await db.products() == []                               # в быструю запись не попадает
+        n = h.llm_calls["n"]
+        out = await h.say("борщ 200 г")
+        assert "по базе продуктов (оценка Claude), без запроса к Claude" in out and "120 ккал" in out
+        assert h.llm_calls["n"] == n
+        await db.update_product(rows["борщ"]["id"], kcal=50)          # ручная правка цифр
+        out = await h.say("суп борщ с хлебом")                         # новый текст → Claude, но цифры из базы
+        assert "по базе продуктов: борщ, хлеб" in out and "борщ 300 г — 150 ккал" in out
+
+        # правка приёма пищи меняет калорийность продукта в базе, если она заметно другая
+        idx = foodbase.index(await db.foods())
+        changed = await foodbase.correct([{"name": "борщ", "grams": 300, "kcal": 240, "protein": 9, "fat": 9, "carbs": 30}], idx)
+        assert changed == ["борщ"] and (await db.get_product(rows["борщ"]["id"]))["kcal"] == 80
+
+        # две упаковки с одним названием и разными штрихкодами: по тексту — последняя использованная
+        a = await db.add_product("куриное филе", 110, 23, 2, 0, "5901234123457", source="barcode")
+        b = await db.add_product("куриное филе", 98, 22, 1, 0, "5900000000001", source="barcode")
+        assert a != b
+        await db.touch_products([b])
+        assert "98 ккал" in await h.say("куриное филе 100 г")
+        await db.update_product(a, aliases="филе курицы")
+        await db.touch_products([a])
+        assert "165 ккал" in await h.say("филе курицы 150 г")
+    run(h, go)
+
+
+def test_products_migration(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE products (name TEXT PRIMARY KEY, kcal REAL, protein REAL, fat REAL, carbs REAL);
+        INSERT INTO products VALUES ('hi tec protein', 378, 79, 3.7, 7.1);
+        CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ts TEXT, title TEXT,
+            kcal REAL, protein REAL, fat REAL, carbs REAL, source TEXT, raw_text TEXT);
+        CREATE TABLE meal_items (id INTEGER PRIMARY KEY AUTOINCREMENT, meal_id INTEGER, name TEXT, grams REAL,
+            kcal REAL, protein REAL, fat REAL, carbs REAL);
+        INSERT INTO meals (id, date, ts) VALUES (1, '2026-11-15', '2026-11-15T13:00:00'), (2, '2026-11-17', '2026-11-17T13:00:00');
+        INSERT INTO meal_items (meal_id, name, grams, kcal, protein, fat, carbs) VALUES
+            (1, 'Картофельное пюре', 270, 300, 5, 10, 45), (2, 'картофельное пюре', 270, 470, 5, 10, 45),
+            (2, 'hi tec protein', 100, 378, 79, 4, 7);
+    """)
+    c.commit(); c.close()
+    monkeypatch.setattr(config, "DB_PATH", path)
+
+    async def go():
+        await db.init()
+        p = await db.products()
+        assert [(x["id"], x["name"], x["pinned"], x["source"]) for x in p] == [(1, "hi tec protein", 1, "label")]
+        rows = {r["name"]: r for r in await db.foods()}
+        pure = rows["картофельное пюре"]
+        assert pure["pinned"] == 0 and pure["source"] == "history" and pure["uses"] == 2
+        assert pure["kcal"] == round((300 / 270 * 100 + 470 / 270 * 100) / 2, 1)
+        await db.close()
+        await db.init()                                             # повторный запуск ничего не дублирует
+        assert len(await db.foods()) == 2
+        await db.close()
+    asyncio.run(go())
+
+
+def test_food_table_roundtrip(h):
+    from io import BytesIO
+    from openpyxl import load_workbook
+    from bot.services import foodtable
+
+    async def go():
+        await onboard(h)
+        await h.say("борщ и 2 куска хлеба")
+        await db.add_product("hi tec protein", 378, 79, 3.7, 7.1, "5901234123457", source="barcode")
+        out = await h.tap("s:table")
+        doc = next(c for c in h.session.calls if type(c).__name__ == "SendDocument")
+        assert "База продуктов: 3, из них в быстрой записи 1" in doc.caption
+        wb = load_workbook(BytesIO(doc.document.data))
+        ws = wb["Продукты"]
+        names = {ws.cell(r, 2).value: r for r in range(2, ws.max_row + 1)}
+        assert ws.cell(names["hi tec protein"], 8).value == "5901234123457"
+        r = names["борщ"]
+        ws.cell(r, 4).value = 55
+        ws.cell(r, 3).value = "борщ домашний, Борщик"
+        ws.cell(r, 10).value = "да"
+        ws.cell(names["хлеб"], 14).value = "да"
+        ws.append([None, "Куриное филе Kraina", "куриное филе", 98, 22, 1, 0, 5900000000001, 500, "да"])
+        ws.append([None, "плохой", "", "abc", 1, 1, 1])
+        ws.append([None, "странный", "", 500, 10, 1, 1])
+        buf = BytesIO(); wb.save(buf)
+        current = await db.foods()
+        changes, errors, warns = foodtable.parse(buf.getvalue(), current)
+        assert {c["op"] for c in changes} == {"upd", "new", "del"} and len(changes) == 4
+        assert any("«ккал» = «abc» — не число" in e for e in errors)
+        assert any("странный" in w for w in warns)
+        text = foodtable.summary(changes, current, errors, warns)
+        assert "ккал 60 → 55" in text and "штрихкод 5900000000001" in text and "Удалить: 1" in text
+        done, errs = await foodtable.apply(changes)
+        assert done == 4 and not errs
+        rows = {r["name"]: r for r in await db.foods()}
+        assert "хлеб" not in rows and rows["борщ"]["kcal"] == 55 and rows["борщ"]["source"] == "manual"
+        assert rows["борщ"]["pinned"] == 1 and rows["борщ"]["aliases"] == "борщ домашний, борщик"
+        assert (await db.product_by_barcode("5900000000001"))["name"] == "куриное филе kraina"
+        assert "по базе продуктов" in await h.say("куриное филе 200 г") and "196 ккал" in h.out()
+        # файл не от бота
+        assert foodtable.parse(b"not xlsx", [])[1]
+    run(h, go)
+
+
+def test_usage_counter(h):
+    async def go():
+        await onboard(h)
+        await h.say("🍽 Что съесть?")
+        await h.say("🍽 Что съесть?")
+        await h.say("450 ккал")
+        await h.tap("r:7")
+        await h.tap("pr:g:5:30")
+        out = await h.tap("s:usage")
+        assert "2 — 🍽 Что съесть?" in out and "1 — еда/вес/тренировка текстом" in out and "1 — отчёт: неделя" in out
+        assert "Ни разу:</b>" in out and "🎙 голосовые" in out
     run(h, go)

@@ -124,8 +124,9 @@ async def free_text(message: Message, state: FSMContext, profile) -> None:
             await state.update_data(wo_label=p.label, wo_day=day)
             return await message.answer(WORKOUT_ASK)
         return await common.record_workout(message, profile, p.value, p.label, day)
-    if p.kind == "steps":
-        return await common.record_steps(message, profile, int(p.value))
+    if p.kind == "steps":  # шаги не ведём: обычная ходьба уже в расходе, на бюджет они не влияют
+        return await message.answer("Шаги не записываю: обычная ходьба уже входит в расход. "
+                                    "Тренировку с часов — так: «трен 400».")
     if p.kind == "ambiguous":
         return await message.answer("Это вес или калории?", reply_markup=kb.ambiguous(p.value))
     try:
@@ -140,5 +141,4 @@ async def free_text(message: Message, state: FSMContext, profile) -> None:
 
 @router.message()
 async def other(message: Message) -> None:
-    await message.answer("Понимаю только текст: вес, калории или описание еды. "
-                         "Голосом удобно через диктовку на клавиатуре телефона.")
+    await message.answer("Понимаю текст, голосовые и фото штрихкода или этикетки продукта.")

@@ -70,26 +70,35 @@ async def build(profile) -> Weekly:
     since, until = db.days_ago(7), db.days_ago(1)
     days = await db.counted_days(since, until, profile["budget"])
     logged = len(await db.daily_kcal(since, until))
-    lines = ["<b>Итоги недели</b>"]
+    lines = ["📊 <b>Итоги недели</b>"]
 
     if days:
         avg = sum(d["kcal"] for d in days) / len(days)
         avg_p = sum(d["protein"] or 0 for d in days) / len(days)
-        ok = sum(1 for d in days if d["kcal"] <= profile["budget"] * 1.05)
+        from .budget import day_limit, plans
+        wo = await db.workouts_by_day(since, until)
+        pl = await plans(profile, since, until)
+        ok = sum(1 for d in days if d["kcal"] <= day_limit(profile, pl[d["date"]], wo.get(d["date"], 0)) * 1.05)
+        low = nutrition.protein_min(profile["target_weight"])
+        p_ok = sum(1 for d in days if (d["protein"] or 0) >= low)
         lines += [
-            f"🔥 Средние калории: {fmt(avg)} при бюджете {fmt(profile['budget'])} "
-            f"(полных дней: {len(days)}/7, с записями: {logged})",
-            f"✅ В бюджете: {ok} из {len(days)} дн.",
-            f"🥩 Средний белок: {fmt(avg_p)} / {profile['protein_goal']} г",
+            "",
+            f"🍽 <b>Питание</b> · полных дней {len(days)}/7, с записями {logged}",
+            f"🔥 Средние калории: {fmt(avg)} при бюджете {fmt(profile['budget'])} · в бюджете {ok} из {len(days)} дн.",
+            f"🥩 Средний белок: {fmt(avg_p)} г (мин {low}, цель {profile['protein_goal']}) · "
+            f"≥ мин {p_ok} из {len(days)} дн." + (" 🔴" if avg_p < low else ""),
         ]
     else:
         lines.append("Полностью записанных дней за неделю нет." if logged else "Записей еды за неделю нет.")
 
-    lines += await workouts_summary(profile, since, until)
+    wl = await workouts_summary(profile, since, until)
+    if wl:
+        lines += ["", "🏋️ <b>Тренировки</b>"] + wl
 
     pts = await weight_points()
     last = await db.last_weight()
     if last and len(pts) >= 2:
+        lines += ["", "⚖️ <b>Вес</b>"]
         week_ago = await db.weight_before(db.days_ago(7))
         if week_ago and week_ago["date"] != last["date"]:
             lines.append(f"⚖️ Тренд веса: {week_ago['trend']:.1f} → {last['trend']:.1f} кг "
@@ -110,7 +119,7 @@ async def build(profile) -> Weekly:
 
     proposal = None
     calc, why = await real_tdee(profile)
-    lines += ["", why]
+    lines += ["", "🔧 <b>Расход и бюджет</b>", why]
     if calc is not None:
         new_tdee = nutrition.smooth_tdee(profile["tdee"], calc)
         b = nutrition.make_budget(new_tdee, profile["pace"], profile["floor_kcal"])

@@ -3,16 +3,16 @@ from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMar
 
 # Постоянная панель снизу. Порядок — по частоте: сверху то, что нажимается каждый день.
 # Вес и еда текстом кнопок не требуют — просто пишутся в чат (подсказка в поле ввода).
-QUICK, TODAY, MENU, CAN, MORE = ("⚡ Быстрая запись", "📊 Отчёт", "🥗 Меню", "❓ Можно ли?", "⚙️ Ещё")
+QUICK, TODAY, EAT, MORE = ("⚡ Быстрая запись", "📊 Отчёт", "🍽 Что съесть?", "⚙️ Ещё")
+CAN = "❓ Можно ли?"   # убрана с панели: теперь кнопка внутри «🍽 Что съесть?»
 # Старые подписи: у пользователя может остаться прежняя клавиатура
-FOOD, WEIGHT, OLD_TODAY, OLD_PROGRESS = "🍽 Еда", "⚖️ Вес", "📊 Сегодня", "📈 Прогресс"
+FOOD, WEIGHT, OLD_TODAY, OLD_PROGRESS, MENU = "🍽 Еда", "⚖️ Вес", "📊 Сегодня", "📈 Прогресс", "🥗 Меню"
 OLD_QUICK = {"📦 Мои продукты", "🕘 Повторить"}
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=QUICK)],
-        [KeyboardButton(text=TODAY), KeyboardButton(text=MENU)],
-        [KeyboardButton(text=CAN), KeyboardButton(text=MORE)],
+        [KeyboardButton(text=QUICK), KeyboardButton(text=EAT)],
+        [KeyboardButton(text=TODAY), KeyboardButton(text=MORE)],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -54,7 +54,9 @@ more_menu = ikb(
 )
 
 service_menu = ikb(
+    [("🔁 Пересмотр рациона", "s:review"), ("📗 Таблица продуктов", "s:table")],
     [("💰 Расход API", "s:cost"), ("📤 Экспорт CSV", "s:export")],
+    [("📈 Чем пользуюсь", "s:usage")],
     [("👤 Профиль заново", "s:profile"), ("❓ Помощь", "s:help")],
 )
 

@@ -8,8 +8,8 @@ from aiogram.types import BotCommand, CallbackQuery, Message
 
 from . import config, db
 from . import keyboards as kb
-from .handlers import diet, food, menu, misc, onboarding, polar
-from .services import reminders
+from .handlers import diet, food, inputs, menu, misc, onboarding, polar
+from .services import reminders, usage
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +42,15 @@ class Access(BaseMiddleware):
                 elif isinstance(event, CallbackQuery):
                     await event.answer("Сначала /start", show_alert=True)
                 return None
+        if profile is not None and (k := usage.key(event)):
+            try:
+                await db.count_use(k)
+            except Exception:  # счётчик не должен мешать работе бота
+                log.exception("Счётчик использования")
         return await handler(event, data)
 
 
-KEYBOARD_VERSION = "4"  # поднять, когда меняется постоянная панель
+KEYBOARD_VERSION = "5"  # поднять, когда меняется постоянная панель
 
 
 async def _keyboard_outdated() -> bool:
@@ -69,12 +74,12 @@ async def main() -> None:
     dp.message.middleware(Access())
     dp.callback_query.middleware(Access())
     # Порядок важен: онбординг → меню и команды → настройки → состояния еды → свободный ввод
-    dp.include_routers(onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router, misc.router)
+    dp.include_routers(onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router, inputs.router, misc.router)
 
     # Меню «/» — по частоте использования
     await bot.set_my_commands([
         BotCommand(command="today", description="Отчёт: сегодня, 3 дня, неделя, всё"),
-        BotCommand(command="menu", description="Меню на сегодня"),
+        BotCommand(command="eat", description="Что съесть сейчас"),
         BotCommand(command="can", description="Влезет ли блюдо в остаток"),
         BotCommand(command="undo", description="Удалить последнюю запись еды"),
         BotCommand(command="chart", description="Прогресс за всё время"),
@@ -90,7 +95,7 @@ async def main() -> None:
     profile = await db.get_profile()
     if profile and profile["chat_id"] and await _keyboard_outdated():
         try:
-            await bot.send_message(profile["chat_id"], "🔄 Бот обновлён: панель внизу и сводка вверху чата.",
+            await bot.send_message(profile["chat_id"], "🔄 Панель обновлена: «❓ Можно ли?» теперь кнопка внутри «🍽 Что съесть?».",
                                    reply_markup=kb.main_menu, disable_notification=True)
         except Exception:
             log.warning("Не удалось отправить клавиатуру")

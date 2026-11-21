@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from .. import db, keyboards as kb
-from ..services import budget, llm, products
+from ..services import foodbase, budget, llm, products
 from ..services.budget import fmt
 from ..services.parser import normalize
 from . import common
@@ -88,7 +88,12 @@ async def meal_edit_apply(message: Message, state: FSMContext, profile) -> None:
     await db.replace_meal_items(meal_id, items)
     if meal["raw_text"]:
         await db.cache_put(normalize(meal["raw_text"]), items)  # правка запоминается
-    await common.send_meal(message, profile, meal_id, "исправлено")
+    note = "исправлено"
+    if not text.replace(" ", "").isdigit():   # число — это итог, а не калорийность продукта
+        changed = await foodbase.correct(items, foodbase.index(await db.foods()))
+        if changed:
+            note += "; в базе продуктов обновлено: " + ", ".join(changed)
+    await common.send_meal(message, profile, meal_id, note)
 
 
 # ---------- уточняющий вопрос ----------
@@ -153,10 +158,9 @@ async def can_start_msg(message: Message, state: FSMContext, profile) -> None:
 
 
 @router.callback_query(F.data == "f:can")
-async def can_start(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(Food.can)
+async def can_start(cb: CallbackQuery, state: FSMContext, profile) -> None:
     await cb.answer()
-    await cb.message.answer("Что хотите съесть? Опишите блюдо. Отмена: /cancel")
+    await can_start_msg(cb.message, state, profile)
 
 
 @router.message(Food.can, F.text)

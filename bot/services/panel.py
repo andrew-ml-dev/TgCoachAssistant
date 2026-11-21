@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from .. import db
 from . import nutrition
+from . import budget
 from .budget import WD, fmt
 
 log = logging.getLogger(__name__)
@@ -21,17 +22,17 @@ log = logging.getLogger(__name__)
 async def panel_text(profile) -> str:
     day = db.today()
     tot = await db.day_totals(day)
-    left = profile["budget"] - tot["kcal"]
-    pct = tot["kcal"] / profile["budget"] * 100
+    allow, bonus, wo = await budget.day_allowance(profile, day)
+    left = allow - tot["kcal"]
+    pct = tot["kcal"] / allow * 100
     d = date.fromisoformat(day)
     head = (f"осталось <b>{fmt(left)}</b> ккал" if left >= 0 else f"перебор <b>+{fmt(-left)}</b> ккал")
     lines = [
         f"📌 {WD[d.weekday()]} {d.strftime('%d.%m')} · {head}",
-        f"{nutrition.bar(pct)} {fmt(tot['kcal'])} / {fmt(profile['budget'])} · белок {fmt(tot['protein'])}/{profile['protein_goal']} г",
+        f"{nutrition.bar(pct)} {fmt(tot['kcal'])} / {fmt(allow)} · белок {fmt(tot['protein'])}/{nutrition.protein_min(profile['target_weight'])}–{profile['protein_goal']} г",
     ]
-    wo = await db.workout_kcal(day)
     if wo:
-        lines.append(f"🏋️ тренировка +{fmt(wo)} ккал к дефициту")
+        lines.append(f"🏋️ тренировка {fmt(wo)}: +{fmt(bonus)} к еде, +{fmt(wo - bonus)} к дефициту")
     w = await db.weight_on(day)
     if w:
         week = await db.weight_before(db.days_ago(7))

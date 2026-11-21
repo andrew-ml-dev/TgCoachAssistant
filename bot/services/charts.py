@@ -10,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.dates as mdates  # noqa: E402
+import matplotlib.transforms  # noqa: E402,F401
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
@@ -31,6 +32,8 @@ BLUE = "#3987e5"      # вес / в бюджете
 ORANGE = "#d95926"    # расчётный вес
 OVER = "#ec835a"      # перебор
 NODATA = "#3a3c42"    # неполный день
+GREEN = "#2f9e6e"     # дефицит
+GREEN_LIGHT = "#7fd1a8"  # часть дефицита от тренировки
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
@@ -46,8 +49,43 @@ class ReportData:
     tdee: float
     target: float
     today: date
-    kpis: list[tuple[str, str, str]] = field(default_factory=list)  # (подпись, значение, пояснение)
+    kpis: list[tuple[str, str, str]] = field(default_factory=list)
+    # (подпись, значение, пояснение) у kpis; ниже — по дням, если план или тренировки меняли цифры
+    target_deficit: float = 0                    # дефицит под выбранный темп — линия цели
+    tdees: dict = field(default_factory=dict)    # дата → расход, действовавший в тот день
     workouts: dict[date, float] = field(default_factory=dict)       # дата -> учтённые ккал тренировки
+
+
+def week_runs(d: ReportData) -> list[dict]:
+    """Недели с понедельника: накопленный дефицит и цель на конец каждого прошедшего дня.
+
+    Дефицит дня = расход того дня + тренировка − съедено. Неполный или пустой день не считается ни в дефицит,
+    ни в цель (иначе забытый ужин выглядел бы как огромный дефицит). Сегодня и дальше — только цель (proj).
+    pts — (граница дня по оси, дефицит, цель); left — сколько дней недели осталось, включая сегодня.
+    """
+    runs: list[dict] = []
+    for x in d.days:
+        if not runs or x.weekday() == 0:
+            runs.append({"pts": [(mdates.date2num(x) - 0.5, 0.0, 0.0)], "proj": [], "daily": {}, "skipped": [],
+                         "cum": 0.0, "tgt": 0.0, "days": 0, "left": 0, "end": x})
+        r = runs[-1]
+        r["end"] = x
+        edge = mdates.date2num(x) + 0.5
+        if x >= d.today:
+            last = r["proj"][-1][1] if r["proj"] else r["tgt"]
+            r["proj"].append((edge, last + d.target_deficit))
+            r["left"] += 1
+            continue
+        if x in d.kcal and d.kcal[x][1]:
+            v = d.tdees.get(x, d.tdee) + d.workouts.get(x, 0) - d.kcal[x][0]
+            r["daily"][x] = v
+            r["cum"] += v
+            r["tgt"] += d.target_deficit
+            r["days"] += 1
+        else:
+            r["skipped"].append(x)
+        r["pts"].append((edge, r["cum"], r["tgt"]))
+    return runs
 
 
 def _style(ax) -> None:
@@ -59,33 +97,12 @@ def _style(ax) -> None:
     ax.tick_params(colors=MUTED, length=0, labelsize=10, pad=6)
 
 
-def _rounded_bars(ax, xs, heights, colors, width, hatches) -> None:
-    """Столбики со скруглённым верхом: скругление пересчитано под соотношение осей."""
-    fig = ax.figure
-    fig.canvas.draw()
-    bbox = ax.get_window_extent()
-    x0, x1 = ax.get_xlim()
-    y0, y1 = ax.get_ylim()
-    aspect = ((y1 - y0) / bbox.height) / ((x1 - x0) / bbox.width)
-    r = width * 0.2
-    for x, h, c, hatch in zip(xs, heights, colors, hatches):
-        if h <= 0:
-            continue
-        p = FancyBboxPatch((x - width / 2, 0), width, h, boxstyle=f"round,pad=0,rounding_size={r}",
-                           mutation_aspect=aspect, facecolor=c, edgecolor=MUTED if hatch else "none",
-                           linewidth=0, hatch=hatch, zorder=3)
-        ax.add_patch(p)
-        # нижние углы делаем прямыми — столбик стоит на оси
-        ax.add_patch(plt.Rectangle((x - width / 2, 0), width, min(h, r * aspect), facecolor=c,
-                                   edgecolor="none", hatch=hatch, linewidth=0, zorder=3))
-
-
 def report_chart(d: ReportData) -> bytes:
     plt.rcParams["font.family"] = FONT
     plt.rcParams["hatch.color"] = "#5c5e65"
     plt.rcParams["hatch.linewidth"] = 1.2
     fig = plt.figure(figsize=(8, 9.4), dpi=135, facecolor=BG)
-    gs = fig.add_gridspec(3, 1, height_ratios=[0.9, 3, 2.2], hspace=0.32, left=0.08, right=0.86, top=0.93, bottom=0.07)
+    gs = fig.add_gridspec(3, 1, height_ratios=[0.9, 3, 2.2], hspace=0.32, left=0.08, right=0.86, top=0.93, bottom=0.09)
 
     # ---------- шапка ----------
     fig.text(0.08, 0.965, d.title, color=INK, fontsize=17, fontweight="semibold", va="center")
@@ -153,61 +170,94 @@ def report_chart(d: ReportData) -> bytes:
     else:
         ax.text(0.5, 0.5, "Взвешиваний пока нет", transform=ax.transAxes, color=MUTED, ha="center")
     ax.set_xlim(xmin, xmax)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+    # целые кг — только при размахе от 3 кг, и тогда деления тоже целые: иначе «90, 90» на соседних делениях
+    ax.yaxis.set_major_locator(plt.MaxNLocator(5, integer=bool(wd) and (hi - lo) >= 3))
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.1f}" if (hi - lo) < 3 else f"{v:.0f}") if wd else plt.NullFormatter())
     ax.tick_params(labelbottom=False)
 
-    # ---------- калории ----------
+    # ---------- дефицит нарастающим с понедельника ----------
     ax2 = fig.add_subplot(gs[2], sharex=ax)
     _style(ax2)
-    ax2.set_title("Калории за день", loc="left", color=INK, fontsize=12, fontweight="medium", pad=10)
-    cd = [x for x in d.days if x in d.kcal]
-    if not cd:
-        ax2.text(0.5, 0.5, "Записей еды за период нет", transform=ax2.transAxes, color=MUTED, ha="center")
-    expense = [d.tdee + d.workouts.get(x, 0) for x in d.days]  # расход дня: база + тренировка
-    kmax = max([d.kcal[x][0] for x in cd] + expense + [d.budget])
-    ax2.set_ylim(0, kmax * 1.14)
+    runs = week_runs(d)
+    head = "Дефицит с понедельника, ккал"
+    if d.target_deficit:
+        head += f"  ·  цель {d.target_deficit:,.0f} в день".replace(",", " ")
+    ax2.set_title(head, loc="left", color=INK, fontsize=12, fontweight="medium", pad=10)
     ax2.set_xlim(xmin, xmax)
-    colors, hatches = [], []
-    for x in cd:
-        k, ok = d.kcal[x]
-        if x == d.today:
-            colors.append("#4b5563"); hatches.append(None)
-        elif not ok:
-            colors.append(NODATA); hatches.append("////")
+    used = set()
+    vals = [0.0]
+    for r in runs:
+        bx = [p[0] for p in r["pts"]]
+        act = [p[1] for p in r["pts"]]
+        tg = [p[2] for p in r["pts"]]
+        vals += act + tg + [p[1] for p in r["proj"]]
+        for x in r["skipped"]:
+            xn = mdates.date2num(x)
+            ax2.axvspan(xn - 0.5, xn + 0.5, facecolor=NODATA, hatch="////", edgecolor="none", alpha=0.6, zorder=1)
+            used.add("nodata")
+        if r["proj"]:  # цель на оставшиеся дни недели
+            px = [bx[-1]] + [p[0] for p in r["proj"]]
+            py = [tg[-1]] + [p[1] for p in r["proj"]]
+            ax2.plot(px, py, color=MUTED, lw=1.2, ls=(0, (3, 3)), zorder=3)
+            ax2.annotate(f"{py[-1]:,.0f}".replace(",", " "), (px[-1], py[-1]), xytext=(0, 5),
+                         textcoords="offset points", ha="right", va="bottom", color=MUTED, fontsize=8.5)
+        if len(bx) < 2:
+            continue
+        ax2.plot(bx, tg, color=INK, lw=1.3, ls=(0, (3, 3)), zorder=4)
+        ax2.fill_between(bx, act, tg, where=[a >= t for a, t in zip(act, tg)], interpolate=True,
+                         color=GREEN, alpha=0.22, linewidth=0, zorder=2)
+        ax2.fill_between(bx, act, tg, where=[a < t for a, t in zip(act, tg)], interpolate=True,
+                         color=OVER, alpha=0.25, linewidth=0, zorder=2)
+        ax2.plot(bx, act, color=GREEN_LIGHT, lw=2.6, zorder=5, solid_capstyle="round", marker="o",
+                 markersize=3.5, markevery=list(range(1, len(bx))))
+        used.add("line")
+        gap = act[-1] - tg[-1]
+        used.add("ahead" if gap >= 0 else "behind")
+        gtxt = f"{abs(gap):,.0f}".replace(",", " ")
+        gtxt = f"+{gtxt} впереди" if gap >= 0 else f"−{gtxt} отстаю"
+        if r is runs[-1]:
+            ax2.annotate(f"{act[-1]:,.0f}".replace(",", " ").replace("-", "−"), (bx[-1], act[-1]),
+                         xytext=(6, 7), textcoords="offset points", color=GREEN_LIGHT, fontsize=11,
+                         fontweight="semibold", va="bottom", annotation_clip=False)
+            ax2.annotate(gtxt, (bx[-1], act[-1]), xytext=(6, -5), textcoords="offset points",
+                         color=GREEN_LIGHT if gap >= 0 else OVER, fontsize=9, va="top", annotation_clip=False)
         else:
-            colors.append(BLUE if k <= d.budget * 1.05 else OVER); hatches.append(None)
-    width = 0.5 if span <= 14 else 0.62
-    _rounded_bars(ax2, mdates.date2num(cd), [d.kcal[x][0] for x in cd], colors, width, hatches)
-    if d.workouts:
-        # ступенька: в дни тренировок расход выше
-        xs = mdates.date2num(d.days)
-        edges = [xmin] + [(a + b) / 2 for a, b in zip(xs, xs[1:])] + [xmax]
-        ax2.stairs(expense, edges, color=INK2, lw=1.1, zorder=4, baseline=None)
-        for x in d.workouts if span <= 14 else []:  # на длинном периоде подписи слипаются, ступенек достаточно
-            if x in d.days:
-                ax2.text(mdates.date2num(x), d.tdee + d.workouts[x] + kmax * 0.02, f"+{d.workouts[x]:,.0f}".replace(",", " "),
-                         color=INK2, fontsize=8.5, ha="center", va="bottom")
-    else:
-        ax2.axhline(d.tdee, color=INK2, lw=1.1, zorder=4)
-    ax2.axhline(d.budget, color=INK, lw=1.3, ls=(0, (3, 3)), zorder=4)
-    end = xmax
-    ax2.text(end, expense[-1], f"  расход {expense[-1]:,.0f}".replace(",", " "), color=INK2, fontsize=9.5, va="center")
-    ax2.text(end, d.budget, f"  бюджет {d.budget:,.0f}".replace(",", " "), color=INK, fontsize=9.5, va="center")
+            ax2.annotate(gtxt.split()[0], (bx[-1], max(act[-1], tg[-1])), xytext=(-2, 4), textcoords="offset points",
+                         ha="right", va="bottom", color=GREEN_LIGHT if gap >= 0 else OVER, fontsize=8)
+        if span > 14:
+            ax2.axvline(bx[0], color=GRID, lw=1, zorder=1)
+    if not any(len(r["pts"]) > 1 for r in runs):
+        ax2.text(0.5, 0.55, "Полных дней на этой неделе пока нет", transform=ax2.transAxes, color=MUTED,
+                 ha="center")
+    top, bottom = max(vals), min(vals)
+    pad = (top - bottom) * 0.14 + 50
+    ax2.set_ylim(bottom - (pad if bottom < 0 else pad * 0.25), top + pad)
+    ax2.axhline(0, color=MUTED, lw=1, zorder=2)
     ax2.yaxis.set_major_locator(plt.MaxNLocator(4))
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}".replace(",", " ")))
-    legend_items = {BLUE: Patch(facecolor=BLUE, label="в бюджете"), OVER: Patch(facecolor=OVER, label="перебор"),
-                    NODATA: Patch(facecolor=NODATA, hatch="////", edgecolor="none", label="неполный"),
-                    "#4b5563": Patch(facecolor="#4b5563", label="сегодня")}
-    handles = [h for c, h in legend_items.items() if c in colors]  # только то, что есть на графике
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}".replace(",", " ").replace("-", "−")))
+    legend = {"line": plt.Line2D([], [], color=GREEN_LIGHT, lw=2.6, label="дефицит"),
+              "target": plt.Line2D([], [], color=INK, lw=1.3, ls=(0, (3, 3)), label="цель"),
+              "ahead": Patch(facecolor=GREEN, alpha=0.4, label="впереди"),
+              "behind": Patch(facecolor=OVER, alpha=0.45, label="отстаю"),
+              "nodata": Patch(facecolor=NODATA, hatch="////", edgecolor="none", label="неполный, не считается")}
+    if "line" in used:
+        used.add("target")
+    handles = [h for k, h in legend.items() if k in used]
     if handles:
-        ax2.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, -0.3), ncol=len(handles), frameon=False,
-                   fontsize=9.5, labelcolor=INK2, handlelength=1.1, handleheight=1.1, columnspacing=1.4)
+        ax2.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, -0.38), ncol=len(handles), frameon=False,
+                   fontsize=9.5, labelcolor=INK2, handlelength=1.4, handleheight=1.1, columnspacing=1.2)
 
     # подписи дат
     if span <= 10:
         ax2.set_xticks(d.days)
-        ax2.set_xticklabels([f"{WEEKDAYS[x.weekday()]}\n{x.day}" for x in d.days])
+        # под датой — дефицит самого дня
+        daily = {k: v for r in runs for k, v in r["daily"].items()}
+
+        def _day(x):
+            if x in daily:
+                return f"{daily[x]:+,.0f}".replace(",", " ").replace("-", "−")
+            return "идёт" if x == d.today else ("—" if x < d.today else "")
+        ax2.set_xticklabels([f"{WEEKDAYS[x.weekday()]} {x.day}\n{_day(x)}" for x in d.days])
     else:
         ax2.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
         ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))

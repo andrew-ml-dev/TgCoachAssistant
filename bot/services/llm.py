@@ -1,7 +1,10 @@
 """Обращения к Claude: разбор еды, оценка активности, недельный разбор, идеи."""
 from __future__ import annotations
 
+import base64
 import logging
+from io import BytesIO
+from typing import Literal
 
 import anthropic
 from pydantic import BaseModel
@@ -30,16 +33,6 @@ class FoodParse(BaseModel):
     question: str  # пустая строка, если уточнение не нужно
 
 
-class MenuMeal(BaseModel):
-    title: str
-    items: list[FoodItem]
-
-
-class DayMenu(BaseModel):
-    meals: list[MenuMeal]
-    tip: str
-
-
 class Product(BaseModel):
     ok: bool        # false, если в тексте нет калорийности
     name: str
@@ -48,6 +41,77 @@ class Product(BaseModel):
     fat: float
     carbs: float
 
+
+class Label(Product):
+    pack: float     # вес упаковки в граммах, 0 — если не виден
+
+
+class ReviewItem(BaseModel):
+    name: str        # точно как в списке продуктов пользователя или справочника
+    role: Literal["p", "c", "f", "v"]
+    grams: float     # обычная порция в этом блюде
+    lo: float        # меньше — не предлагать (0 — можно убрать из блюда)
+    hi: float
+
+
+class ReviewDish(BaseModel):
+    title: str
+    slot: Literal["утро", "день", "вечер", "любое"]
+    from_history: bool   # пользователь уже ест это сочетание
+    items: list[ReviewItem]
+
+
+class ReviewFix(BaseModel):
+    problem: str
+    change: str
+    why: str
+    short: str           # до 40 символов, для напоминания
+
+
+class DietReview(BaseModel):
+    summary: str
+    fixes: list[ReviewFix]
+    dishes: list[ReviewDish]
+
+
+class VoiceCommand(BaseModel):
+    action: Literal["food", "kcal", "workout", "weight", "can_eat", "report", "menu", "undo",
+                    "product", "unknown"]
+    text: str
+    value: float
+    yesterday: bool
+
+
+class VoiceParse(BaseModel):
+    commands: list[VoiceCommand]
+
+
+VOICE_SYSTEM = """Ты разбираешь голосовое сообщение пользователя Telegram-бота для похудения. Текст получен \
+распознаванием речи и часто искажает слова: восстанавливай их по звучанию (например «селом лет» — «омлет», \
+«гречу» — «гречку»), особенно названия еды; если искажённое слово похоже на продукт из списка привычной еды \
+пользователя, бери его. \
+Определи, что хочет пользователь, и верни список команд по порядку. Команды:
+- food — записать съеденное. text: что и сколько съел, коротко, с количествами, как сказано \
+(например «гречка 200 г, котлета, огурец»), без слов «я съел», «запиши».
+- kcal — записать только число калорий без описания еды. value: калории; text: к чему относится, если сказано.
+- workout — тренировка. value: калории с часов (0, если не названы); text: вид тренировки, коротко.
+- weight — вес тела. value: килограммы.
+- can_eat — спрашивает, можно ли съесть / влезет ли блюдо в остаток, ничего не записывая. text: блюдо.
+- report — хочет отчёт: сколько съел, сколько осталось, итоги дня.
+- menu — спрашивает, что ему сейчас съесть, или хочет идею/меню.
+- undo — удалить или отменить последнюю запись еды.
+- product — запомнить продукт с этикетки. text: название и пищевая ценность, как сказано.
+- unknown — ничего из перечисленного. text: одна короткая фраза по-русски о том, что бот умеет \
+(записать еду, тренировку, вес; спросить, влезет ли блюдо; показать отчёт или подсказать, что съесть).
+Числа словами переводи в цифры. yesterday=true, если речь о вчерашнем дне. \
+Для команд без числа value=0, без текста text — пустая строка. \
+Несколько действий в одном сообщении — несколько команд."""
+
+LABEL_SYSTEM = """На фото упаковка продукта или таблица пищевой ценности. Извлеки пищевую ценность на 100 г: \
+ккал, белки, жиры, углеводы (если дано только на порцию — пересчитай на 100 г). \
+name: подсказка пользователя, если она есть; иначе бренд и название с упаковки строчными буквами; иначе пустая строка. \
+pack: масса нетто упаковки в граммах (мл считай граммами), 0 — если не видна. \
+Если таблицы с калорийностью на фото нет — ok=false."""
 
 PRODUCT_SYSTEM = """Пользователь диктует данные с этикетки продукта. Извлеки название (как написал пользователь, \
 строчными буквами, без слов «продукт», «запомни») и пищевую ценность на 100 г: ккал, белки, жиры, углеводы. \
@@ -67,29 +131,27 @@ FOOD_SYSTEM = """Ты диетолог-нутрициолог. Пользова�
 (например «поел в ресторане» без состава). В этом случае items оставь пустым. Иначе question — пустая строка.
 - Если текст вообще не про еду, верни пустой items и question с просьбой описать еду."""
 
-MENU_SYSTEM = """Ты диетолог. Составь меню для человека, который худеет и хочет сохранить мышцы.
+DIET_REVIEW_SYSTEM = """Ты спортивный диетолог. Человек худеет с сохранением мышц и записывает всю еду в бота. \
+Тебе даны факты, посчитанные кодом по его записям: средние за полные дни, его продукты с обычными порциями, \
+повторяющиеся приёмы пищи, найденные перекосы и цели. Цифры уже посчитаны — не пересчитывай их и не спорь с ними.
 
-Требования:
-- Сумма калорий всех приёмов пищи — в пределах ±5% от заданной. Белка — не меньше заданного. \
-Перед ответом пересчитай суммы и поправь порции, если не сходится.
-- Простые продукты из обычного супермаркета, готовка не дольше 20 минут.
-- Сытно при малой калорийности: нежирный белок, много овощей, клетчатка; минимум масла и сахара.
-- Каждый продукт — отдельная позиция: название со строчной буквы, масса в граммах в готовом виде, ккал, белки, жиры, углеводы. \
-Для круп и макарон допиши в названии сухой вес, например «гречка (60 г сухой)».
-- Число приёмов пищи и их время бери из предпочтений пользователя: если он ест 2 раза в день или держит \
-интервальное голодание — ровно столько приёмов, без перекусов, и весь объём калорий и белка распредели между ними. \
-Если ничего не сказано — 3–4 приёма. Если указано, что часть дня прошла, планируй только оставшиеся.
-- title приёма пищи — короткое название: Завтрак, Обед, Ужин, Перекус; если пользователь назвал время, добавь его, например «Обед, 12:00».
-- Протеиновый коктейль включи ровно в указанном количестве порций, позицией «протеиновый коктейль» \
-с точно указанными белком и калориями на порцию. Если порций 0 — не включай.
-- Белка — не меньше заданного, но и не больше чем на 15% сверх: лишний белок съедает калории, нужные для сытности.
-- Строго соблюдай предпочтения и ограничения пользователя. Не повторяй вчерашние блюда.
-- tip — один практический совет на день, не длиннее 15 слов."""
+Задача — подстроить питание под его реальные привычки, а не придумать новую диету.
+1. summary: 2–3 коротких предложения — как он ест сейчас и главное, что стоит поправить. Без похвалы и воды.
+2. fixes: 1–3 самые важные поправки на эту неделю, по убыванию пользы для похудения с сохранением мышц. \
+Каждая — конкретная замена или изменение порции в его же продуктах, которое легко выполнить \
+(«пюре 270 → 180 г и огурец 150 г рядом», а не «ешьте больше овощей»). Не трогай то, что работает. \
+Протеиновый порошок — нормальный источник белка; поправляй его только если из-за него не хватает обычной еды. \
+short — суть поправки до 40 символов. Если есть прошлый разбор, учти, что из него уже выполнено, и не повторяй \
+выполненное.
+3. dishes: 4–8 блюд, из которых он будет выбирать, что съесть. Сначала его собственные частые сочетания \
+с поправками из fixes (from_history=true), потом 1–3 новых варианта из его продуктов и справочника, \
+закрывающих перекосы (from_history=false). Названия продуктов в items — строго дословно из списков \
+«Продукты пользователя» или «Справочник», ничего другого. role: p — главный источник белка, c — углеводы, \
+f — жиры, v — овощи. grams — порция с поправкой; lo/hi — разумные пределы, в которых бот будет подгонять \
+порцию под остаток калорий (lo=0, если часть можно убрать). В каждом блюде должна быть часть с role=p. \
+Протеиновый порошок отдельным блюдом не включай. slot — когда это обычно едят.
+Учитывай предпочтения пользователя. Пиши по-русски, коротко."""
 
-COACH_SYSTEM = """Ты тренер по снижению веса. По данным за неделю дай короткий разбор по-русски: \
-1–2 наблюдения о паттернах и 2–3 конкретных совета на следующую неделю. \
-Без воды, морализаторства и общих фраз, не более 120 слов, обычный текст без разметки. \
-Если темп потери выше 1.5% веса в неделю или калорий меньше 1200 — прямо скажи, что это чересчур."""
 
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
@@ -109,21 +171,28 @@ async def _check_budget() -> None:
         )
 
 
-async def _call(kind: str, system: str, user: str, schema=None, max_tokens: int = 4000):
+async def _call(kind: str, system: str, user: str | list, schema=None, max_tokens: int = 4000,
+                model: str | None = None, effort: str = "low"):
     await _check_budget()
     client = _get_client()
+    model = model or config.MODEL
     kwargs = dict(
-        model=config.MODEL,
+        model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
-        output_config={"effort": "low"},
+        output_config={"effort": effort},
     )
+    api = client.messages
+    if model == "claude-sonnet-5-5":
+        # при отказе классификатора API сам повторит запрос на запасной модели в том же вызове
+        api = client.beta.messages
+        kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     try:
         if schema is not None:
-            resp = await client.messages.parse(output_format=schema, **kwargs)
+            resp = await api.parse(output_format=schema, **kwargs)
         else:
-            resp = await client.messages.create(**kwargs)
+            resp = await api.create(**kwargs)
     except anthropic.AuthenticationError:
         raise LLMError("Ключ Anthropic API не принят. Проверьте ANTHROPIC_API_KEY в .env.")
     except anthropic.RateLimitError:
@@ -134,7 +203,7 @@ async def _call(kind: str, system: str, user: str, schema=None, max_tokens: int 
     except anthropic.APIConnectionError:
         raise LLMError("Нет связи с Claude API. Попробуйте позже или внесите калории числом.")
 
-    await db.add_usage(kind, resp.usage.input_tokens, resp.usage.output_tokens)
+    await db.add_usage(kind, resp.usage.input_tokens, resp.usage.output_tokens, resp.model or model)
     if resp.stop_reason in ("refusal", "max_tokens"):
         raise LLMError("Не получилось разобрать сообщение. Попробуйте описать иначе.")
     if schema is not None:
@@ -158,6 +227,28 @@ async def parse_product(text: str) -> Product:
     return await _call("product", PRODUCT_SYSTEM, text, Product, 2000)
 
 
+async def route_voice(text: str, known_foods: list[str] = ()) -> VoiceParse:
+    user = f"Распознанный текст: {text}"
+    if known_foods:
+        user += "\n\nПривычная еда пользователя: " + ", ".join(dict.fromkeys(known_foods))
+    return await _call("voice", VOICE_SYSTEM, user, VoiceParse, 2000)
+
+
+def _jpeg_b64(data: bytes) -> str:
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+    img.thumbnail((1280, 1280))  # мелкий текст этикетки читается, токенов меньше
+    buf = BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+async def parse_label(image: bytes, hint: str = "") -> Label:
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(image)}},
+               {"type": "text", "text": f"Подсказка пользователя: {hint}" if hint else "Подсказки нет."}]
+    return await _call("label", LABEL_SYSTEM, content, Label, 2000)
+
+
 async def correct_food(items: list[dict], correction: str) -> FoodParse:
     lines = "\n".join(f"- {i['name']}, {i['grams']:.0f} г, {i['kcal']:.0f} ккал" for i in items)
     user = (f"Текущий разбор приёма пищи:\n{lines}\n\nПоправка пользователя: {correction}\n\n"
@@ -165,35 +256,9 @@ async def correct_food(items: list[dict], correction: str) -> FoodParse:
     return await _call("food_fix", FOOD_SYSTEM, user, FoodParse)
 
 
-async def weekly_review(summary: str) -> str:
-    return await _call("weekly", COACH_SYSTEM, summary, max_tokens=3000)
 
 
-async def day_menu(kcal: float, protein: float, prefs: str, shakes: int, shake_protein: float,
-                   shake_kcal: float, avoid: list[str], hour: int, eaten_kcal: float,
-                   dislikes: list[str] = (), likes: list[str] = ()) -> DayMenu:
-    parts = [f"Калории на меню: {kcal:.0f} ккал. Белок: не меньше {protein:.0f} г."]
-    if eaten_kcal > 0 or hour >= 12:
-        parts.append(f"Сейчас {hour}:00, сегодня уже съедено {eaten_kcal:.0f} ккал — это меню только на остаток дня.")
-    parts.append(f"Протеиновый коктейль: {shakes} порц. (одна порция: {shake_protein:.0f} г белка, {shake_kcal:.0f} ккал).")
-    parts.append(f"Предпочтения и ограничения: {prefs or 'нет, обычная домашняя еда'}.")
-    if dislikes:
-        parts.append("Никогда не предлагай (пользователь это не ест): " + ", ".join(dislikes) + ".")
-    if likes:
-        parts.append("Пользователь сам часто ест: " + ", ".join(likes) + ". Опирайся на привычные ему продукты.")
-    if avoid:
-        parts.append("Вчера было: " + ", ".join(avoid[:25]) + ".")
-    return await _call("menu", MENU_SYSTEM, "\n".join(parts), DayMenu, max_tokens=8000)
-
-
-async def replace_meal(title: str, kcal: float, protein: float, old: list[str],
-                       dislikes: list[str], prefs: str) -> MenuMeal:
-    parts = [
-        f"Замени один приём пищи в меню: {title}. Было: {', '.join(old)}.",
-        f"Нужен другой вариант на {kcal:.0f} ккал (±5%) и не меньше {protein:.0f} г белка, из других основных продуктов.",
-        "Протеиновый коктейль не добавляй.",
-        f"Предпочтения и ограничения: {prefs or 'нет'}.",
-    ]
-    if dislikes:
-        parts.append("Никогда не предлагай (пользователь это не ест): " + ", ".join(dislikes) + ".")
-    return await _call("menu_swap", MENU_SYSTEM, "\n".join(parts), MenuMeal, max_tokens=4000)
+async def diet_review(facts: str) -> DietReview:
+    """Недельный разбор рациона — на модели сильнее (config.REVIEW_MODEL)."""
+    return await _call("diet_review", DIET_REVIEW_SYSTEM, facts, DietReview, max_tokens=16000,
+                       model=config.REVIEW_MODEL, effort="medium")

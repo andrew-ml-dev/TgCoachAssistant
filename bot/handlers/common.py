@@ -1,18 +1,20 @@
 """Общие действия, которые вызываются из меню, свободного ввода и кнопок."""
-import re
+import logging
 from html import escape
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, InputMediaPhoto, Message
 
 from .. import db, keyboards as kb
-from ..services import budget, llm, nutrition, panel, products, report_view, weekly
+from ..services import base_foods, budget, diet_review, foodbase, llm, nutrition, panel, products, report_view, weekly
 from ..services.budget import fmt
 from ..services.parser import normalize
 
+log = logging.getLogger(__name__)
+
 
 def meal_text(meal, items: list[dict]) -> str:
-    head = f"{escape(meal['title'])} — " if meal["source"] == "menu" else ""
+    head = f"{escape(meal['title'])} — " if meal["source"] in ("menu", "base") and meal["title"] else ""
     lines = [f"<b>{head}{fmt(meal['kcal'])} ккал</b> "
              f"(Б {fmt(meal['protein'])} · Ж {fmt(meal['fat'])} · У {fmt(meal['carbs'])})"]
     for i in items:
@@ -23,7 +25,8 @@ def meal_text(meal, items: list[dict]) -> str:
 
 async def day_note(profile, day: str) -> str:
     tot = await db.day_totals(day)
-    return f"📅 Записано на вчера. Итог за вчера: {fmt(tot['kcal'])} / {fmt(profile['budget'])} ккал."
+    allow, _, _ = await budget.day_allowance(profile, day)
+    return f"📅 Записано на вчера. Итог за вчера: {fmt(tot['kcal'])} / {fmt(allow)} ккал."
 
 
 async def send_meal(message: Message, profile, meal_id: int, note: str = "") -> None:
@@ -54,15 +57,28 @@ async def record_food_text(message: Message, profile, text: str, allow_question:
                            day: str | None = None) -> str | None:
     """Разбирает описание еды. Возвращает уточняющий вопрос, если он нужен.
 
-    Порядок: продукт с этикетки → сохранённый разбор → Claude.
+    Порядок: продукт с этикетки → база продуктов (выученное, синонимы) → справочник → сохранённый разбор → Claude.
+    Всё, что Claude разобрал, сверяется с базой: известный продукт считается по её цифрам, новый — запоминается.
     """
     prods = await db.products()
+    idx = foodbase.index(await db.foods())
     key = normalize(text)
+    used: list[dict] = []
     exact = products.match_exact(text, prods)
+    known = None if exact else foodbase.match_text(text, idx)
+    base = None if exact or known else base_foods.match(text)
     if exact:
         items, source, note = [exact], "product", "по этикетке, без запроса к Claude"
+        used = [p for p in prods if p["name"] == exact["name"]][:1]
+    elif known:
+        row = known[1]
+        items, source, used = [known[0]], "db", [row]
+        note = f"по базе продуктов ({foodbase.SOURCES.get(row['source'], row['source'])}), без запроса к Claude"
+    elif base:
+        items, source, note = [base], "base", "по справочнику, без запроса к Claude"
     elif (cached := await db.cache_get(key)) is not None:
-        items, source, note = products.apply(cached, prods), "cache", "из сохранённого, без запроса к Claude"
+        items, used = foodbase.apply(products.apply(cached, prods), idx)
+        source, note = "cache", "из сохранённого, без запроса к Claude"
     else:
         await message.bot.send_chat_action(message.chat.id, "typing")
         parsed = await llm.parse_food(text, allow_question, products=prods)
@@ -71,8 +87,16 @@ async def record_food_text(message: Message, profile, text: str, allow_question:
         if not parsed.items:
             await message.answer("Не нашёл здесь еды. Опишите, что съели, или отправьте калории: «450 ккал».")
             return None
-        items, source, note = products.apply([i.model_dump() for i in parsed.items], prods), "llm", ""
+        items, used = foodbase.apply(products.apply([i.model_dump() for i in parsed.items], prods), idx)
+        source, note = "llm", ""
+        if used:
+            note = "по базе продуктов: " + ", ".join(sorted({u["name"] for u in used}))
+        new = await foodbase.learn(items, idx)
+        if new:
+            note = (note + "; " if note else "") + f"новых продуктов в базе: {new}"
         await db.cache_put(key, items)  # повтор того же текста — без запроса; правка перезапишет
+    if used:
+        await db.touch_products([u["id"] for u in used])
     mid = await db.add_meal(items, source=source, raw_text=text, day=day)
     await send_meal(message, profile, mid, note)
     return None
@@ -115,18 +139,39 @@ async def record_weight(message: Message, profile, value: float) -> None:
     await panel.refresh(message.bot, profile)
     from .polar import weight_hint
     await weight_hint(message.bot, profile)
+    await ask_yesterday(message, profile)
 
 
-async def record_steps(message: Message, profile, steps: int) -> None:
-    w = await db.last_weight()
-    kcal = nutrition.steps_kcal(steps, w["weight"] if w else profile["start_weight"])
-    await db.add_activity(f"{steps} шагов", kcal)
-    await message.answer(f"👟 {fmt(steps)} шагов ≈ {fmt(kcal)} ккал. В бюджет еды не добавляю: "
-                         "активность учитывается в реальном расходе, который я считаю по весу.")
+async def ask_yesterday(message: Message, profile) -> None:
+    """Утром, вместе с весом: «вчера всё записали?». Вечером спрашивать рано — едите и после 21:00."""
+    day = db.days_ago(1)
+    tot = await db.day_totals(day)
+    if not tot["n"] or (await db.day_state(day))["complete"] != 0:
+        return
+    allow, _, _ = await budget.day_allowance(profile, day)
+    low = nutrition.protein_min(profile["target_weight"])
+    p = f"белок {fmt(tot['protein'])} г" + (f" — ниже минимума {low}" if tot["protein"] < low else "")
+    await message.answer(f"🗓 <b>Вчера</b>: {fmt(tot['kcal'])} из {fmt(allow)} ккал, {p}.\n"
+                         "Всё записали? Неполные дни я не учитываю в расчёте расхода и прогнозе.",
+                         reply_markup=kb.day_done(day))
+
+
+async def workout_budget_lines(profile, day: str, eaten: float) -> list[str]:
+    """Что тренировка дала еде и дефициту — одинаково для ручной записи и Polar."""
+    allow, bonus, wo = await budget.day_allowance(profile, day)
+    bal = profile["tdee"] + wo - eaten
+    left = allow - eaten
+    out = [f"🍽 Бюджет еды {'сегодня' if day == db.today() else 'за тот день'}: "
+           f"<b>{budget.allowance_text(profile, bonus)} ккал</b>"
+           + (f", осталось <b>{fmt(left)}</b>" if day == db.today() and left > 0 else ""),
+           f"<i>Тренировка: +{fmt(bonus)} к еде, +{fmt(wo - bonus)} к дефициту (запас на ошибку часов "
+           "и на ваш темп).</i>",
+           f"Баланс сейчас: съедено {fmt(eaten)} → <b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>"]
+    return out
 
 
 async def record_workout(message: Message, profile, raw: float, label: str = "", day: str | None = None) -> None:
-    """Калории тренировки с часов: идут в расход дня, бюджет еды не меняют."""
+    """Калории тренировки с часов: идут в расход дня, часть — в бюджет еды (см. nutrition.workout_bonus)."""
     net = nutrition.workout_net(raw)
     day = day or db.today()
     imported = [w for w in await db.workouts_on(day) if w["ext_id"]]
@@ -140,9 +185,8 @@ async def record_workout(message: Message, profile, raw: float, label: str = "",
         f"🏋️ Тренировка {when}: {fmt(raw)} ккал с часов → в расход <b>{fmt(net)} ккал</b>",
         f"<i>−15%: обычный расход за это время уже входит в {fmt(profile['tdee'])}, а часы его тоже считают.</i>",
         f"Расход {when}: {fmt(profile['tdee'])} + {fmt(wo)} = <b>{fmt(spent)} ккал</b>",
-        f"Баланс: съедено {fmt(eaten)} → <b>{'дефицит' if bal >= 0 else 'профицит'} {fmt(abs(bal))} ккал</b>",
-        "Бюджет еды прежний: тренировка ускоряет похудение, а не даёт право съесть больше.",
     ]
+    lines += await workout_budget_lines(profile, day, eaten)
     markup = kb.ikb([("❌ Удалить", f"wo:del:{wid}")])
     if imported:
         p = imported[-1]
@@ -209,12 +253,10 @@ async def send_weekly(bot, chat_id: int, profile, with_review: bool) -> None:
         markup = kb.ikb([(f"✅ Принять бюджет {fmt(b)}", f"bud:{t}:{b}")])
     await bot.send_message(chat_id, rep.text, reply_markup=markup)
     if with_review:
+        # разбор рациона заменил общий «🧠 Разбор»: итоги недели в нём уже учтены
         try:
-            review = await llm.weekly_review(_plain(rep.text))
-            await bot.send_message(chat_id, "🧠 <b>Разбор</b>\n" + escape(review))
-        except llm.LLMError:
-            pass
+            text, _ = await diet_review.run(profile)
+            await bot.send_message(chat_id, text)
+        except llm.LLMError as e:
+            log.warning("Разбор рациона не получился: %s", e)
 
-
-def _plain(html_text: str) -> str:
-    return re.sub(r"<[^>]+>", "", html_text)
