@@ -8,7 +8,7 @@ from aiogram.types import BotCommand, CallbackQuery, Message
 
 from . import config, db
 from . import keyboards as kb
-from .handlers import diet, food, inputs, menu, misc, onboarding, polar
+from .handlers import body, diet, food, inputs, menu, misc, onboarding, polar
 from .services import reminders, usage
 
 log = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ async def main() -> None:
     dp.message.middleware(Access())
     dp.callback_query.middleware(Access())
     # Порядок важен: онбординг → меню и команды → настройки → состояния еды → свободный ввод
-    dp.include_routers(onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router, inputs.router, misc.router)
+    dp.include_routers(onboarding.router, menu.router, body.router, diet.router, onboarding.settings_router, food.router, polar.router, inputs.router, misc.router)
 
     # Меню «/» — по частоте использования
     await bot.set_my_commands([

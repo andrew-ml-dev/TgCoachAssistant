@@ -117,6 +117,11 @@ async def build(profile) -> Weekly:
             lines.append("⏸ Плато: тренд не меняется две недели. Проверьте точность записей (масло, перекусы, "
                          "напитки) и взвешивайте порции; если всё точно — бюджет будет пересчитан ниже.")
 
+    from . import body
+    ml = body.weekly_line(profile, await db.measure_sessions())
+    if ml:
+        lines += ["", ml]
+
     proposal = None
     calc, why = await real_tdee(profile)
     lines += ["", "🔧 <b>Расход и бюджет</b>", why]

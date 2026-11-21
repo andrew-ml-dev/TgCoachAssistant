@@ -13,7 +13,7 @@ from aiogram.methods import DeleteMessage, EditMessageMedia, EditMessageText, Se
 from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
 
 from bot import config, db
-from bot.handlers import diet, food, inputs, menu, misc, onboarding, polar
+from bot.handlers import body, diet, food, inputs, menu, misc, onboarding, polar
 from bot.main import Access
 from bot.services import llm, reminders
 
@@ -53,7 +53,7 @@ class Harness:
 
     @staticmethod
     def _fresh_routers():
-        rs = [onboarding.router, menu.router, diet.router, onboarding.settings_router, food.router, polar.router,
+        rs = [onboarding.router, menu.router, body.router, diet.router, onboarding.settings_router, food.router, polar.router,
               inputs.router, misc.router]
         for r in rs:
             r._parent_router = None
@@ -185,7 +185,7 @@ def test_logging_food(h):
 
         # кнопка «Повторить»
         out = await h.tap("f:recent")
-        assert "🕘 — записать ещё раз как было" in out
+        assert "ввести граммы" in out and "🕘" not in out
     run(h, go)
 
 
@@ -270,7 +270,8 @@ def test_products(h):
         assert h.llm_calls["products"][0]["name"] == "hi tec protein"
         assert "hi tec protein 30 г — 114 ккал" in out and "434 ккал" in out
         out = await h.tap("s:products")
-        assert "📦 — выбрать продукт и ввести вес" in out and "🕘 — записать ещё раз" in out
+        assert "ввести граммы" in out
+        assert any("hi tec protein" in b.text for row in h.session.calls[-1].reply_markup.inline_keyboard for b in row)
         # выбор продукта кнопкой и ввод веса
         pid = (await db.products())[0]["id"]
         await h.tap(f"pr:use:{pid}")
@@ -440,7 +441,7 @@ def test_panel_and_bottom_buttons(h):
 
         # кнопки постоянной панели
         out = await h.say("⚡ Быстрая запись")
-        assert "Быстрая запись" in out and "🕘 — записать ещё раз" in out
+        assert "Быстрая запись" in out and "ввести граммы" in out
         assert "объединены" in await h.say("🕘 Повторить")         # старые кнопки работают
         assert "объединены" in await h.say("📦 Мои продукты")
         assert "влезет ли в остаток (1 050 ккал)" in await h.say("❓ Можно ли?")
@@ -995,7 +996,7 @@ def test_what_to_eat(h):
         await onboard(h)
         await h.say("2 яйца")
         out = await h.say("🍽 Что съесть?")
-        assert "Что съесть сейчас" in out and "Не хватает: белок" in out and "<b>1. " in out
+        assert "Что съесть сейчас" in out and "Не хватает за день: белок" in out and "<b>1. " in out
         assert h.llm_calls["n"] == 0
         mk = h.session.calls[-1].reply_markup
         picks = [b.callback_data for row in mk.inline_keyboard for b in row if b.callback_data.startswith("ws:")
@@ -1007,6 +1008,10 @@ def test_what_to_eat(h):
         assert len(await db.meals_on(db.today())) == 2
         assert "Другие" in str(mk)
         assert "<b>4. " not in await h.tap("ws:more:3")
+        # белок и жиры добраны — есть не предлагаем, остаток идёт в дефицит
+        await db.add_meal([{"name": "x", "grams": 0, "kcal": 600, "protein": 140, "fat": 60, "carbs": 0}], source="text")
+        out = await h.say("🍽 Что съесть?")
+        assert "уже добраны" in out and "уйдут в дефицит" in out and "<b>1. " not in out
 
     run(h, go)
 
@@ -1014,14 +1019,15 @@ def test_what_to_eat(h):
 def test_suggest_portions():
     from bot.services import suggest
     prof = {"target_weight": 82, "protein_goal": 164}
-    # вечер, запас большой: приём не больше 700, белок в приоритете
+    # вечер, запас большой: не съедаем остаток, а добираем белок до минимума наименьшими калориями
     nd = suggest.need(prof, {"kcal": 900, "protein": 95, "fat": 30}, 2188, 19)
-    assert nd.kcal == 700 and nd.capped and nd.meals_left == 1
-    for _, dish, items in suggest.options(nd, 19)[:3]:
-        assert sum(x["kcal"] for x in items) <= 700 * 1.15 + 30
-        assert sum(x["protein"] for x in items) >= 40
-    # утром — на один приём из трёх
-    assert suggest.need(prof, {"kcal": 0, "protein": 0, "fat": 0}, 1500, 8).kcal == 500
+    assert nd.meals_left == 1 and nd.protein == 131 - 95
+    top = suggest.options(nd, 19)[:3]
+    for _, dish, items in top:
+        assert sum(x["protein"] for x in items) >= 30 and sum(x["kcal"] for x in items) <= 400
+        assert not any(x["name"] in ("гречка варёная", "рис варёный", "картофель варёный") for x in items)
+    # утром белок дня делится на 3 приёма
+    assert suggest.need(prof, {"kcal": 0, "protein": 0, "fat": 0}, 1500, 8).protein == 131 / 3
     # названия собираются из того, что вошло
     d = suggest.DISHES[7]
     assert suggest.title(d, [{"name": "творог обезжиренный"}, {"name": "сметана 15%"}]) == "Обезжиренный творог со сметаной"
@@ -1231,4 +1237,63 @@ def test_usage_counter(h):
         out = await h.tap("s:usage")
         assert "2 — 🍽 Что съесть?" in out and "1 — еда/вес/тренировка текстом" in out and "1 — отчёт: неделя" in out
         assert "Ни разу:</b>" in out and "🎙 голосовые" in out
+    run(h, go)
+
+
+def test_quick_record_recent_products(h):
+    """Быстрая запись: последние продукты без повторов → выбрать → граммы."""
+    async def go():
+        await onboard(h)
+        chick = await db.add_product("куриное филе", 110, 23, 1.5, 0, source="claude", pinned=0)
+        await db.add_product("пюре", 90, 2, 3, 14, source="claude", pinned=0)
+        prot = await db.add_product("hi tec protein", 378, 79, 3, 6, source="label", pinned=1)
+        mk = lambda n, g, k: {"name": n, "grams": g, "kcal": k, "protein": 0, "fat": 0, "carbs": 0}
+        await db.add_meal([mk("пюре", 250, 225)], source="text")
+        await db.add_meal([mk("Куриное филе", 150, 165)], source="text")
+        await db.add_meal([mk("куриное филе", 200, 220)], source="text")
+        out = await h.say("⚡ Быстрая запись")
+        assert "🕘" not in out
+        btns = [b for row in h.session.calls[-1].reply_markup.inline_keyboard for b in row]
+        uses = [b.callback_data for b in btns if b.callback_data.startswith("pr:use:")]
+        assert uses[0] == f"pr:use:{chick}" and len(uses) == 3 and uses[-1] == f"pr:use:{prot}"
+        out = await h.tap(f"pr:use:{chick}")
+        assert "Сколько граммов «куриное филе»" in out and "110 ккал" in out
+        await h.say("180")
+        m = await db.last_meal()
+        assert round(m["kcal"]) == 198 and round(m["protein"]) == 41
+    run(h, go)
+
+
+def test_body_measurements(h):
+    """Замеры: предложение после веса раз в неделю, шаги с пропуском, % жира по калиперу, итоги недели."""
+    from bot.services import body, weekly
+
+    async def go():
+        await onboard(h)
+        await db.save_measure(db.days_ago(7), "waist", 97)
+        for k, v in (("sf_chest", 14), ("sf_abdomen", 24), ("sf_thigh", 16)):
+            await db.save_measure(db.days_ago(7), k, v)
+        out = await h.say("91.5")
+        assert "замерим?" in out
+        assert "s:measure" in str(h.session.calls[0].reply_markup)          # кнопка под каждым весом
+        assert "замерим?" not in await h.say("91.4")              # второй раз за день не спрашиваем
+        out = await h.tap("bm:go")
+        assert "Талия" in out and "пупка" in out
+        assert "от 15 до 200" in await h.say("950")
+        await h.say("95,5")
+        await h.tap("bm:skip")                                     # грудь
+        for _ in range(3):
+            await h.tap("bm:skip")                                 # бёдра, бедро, рука
+        await h.say("12")
+        await h.say("20")
+        out = await h.say("15")
+        assert "Талия: <b>95.5 см</b> (-1.5 к прошлому)" in out
+        assert "Жир по калиперу: <b>14.7%</b>" in out and "без жира" in out and "→ -2.0%" in out
+        assert body.body_fat("m", 34, {"sf_chest": 12, "sf_abdomen": 20, "sf_thigh": 15}) == 14.7
+        assert "жир 16.7 → 14.7%" in (await weekly.build(await db.get_profile())).text
+        assert "замерим?" not in await h.say("91.3")               # замеры свежие
+        await h.tap("s:measure")
+        assert "Закончить" in str(h.session.calls[-1].reply_markup)
+        await h.tap("bm:done")
+        assert "Замеры" in h.out()
     run(h, go)

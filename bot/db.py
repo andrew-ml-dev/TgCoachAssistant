@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS day_state (
     last_weight_remind TEXT, warned INTEGER DEFAULT 0, sent TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS budget_history (date TEXT, tdee INTEGER, budget INTEGER);
+CREATE TABLE IF NOT EXISTS measurements (date TEXT, key TEXT, value REAL, PRIMARY KEY (date, key));
 CREATE TABLE IF NOT EXISTS usage (key TEXT, day TEXT, n INTEGER DEFAULT 0, PRIMARY KEY (key, day));
 CREATE TABLE IF NOT EXISTS diet_plan (id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS products (
@@ -301,10 +302,11 @@ async def move_meal(meal_id: int, day: str) -> None:
     await _exec("UPDATE meals SET date = ? WHERE id = ?", day, meal_id)
 
 
-async def recent_meals(limit: int = 10) -> list[aiosqlite.Row]:
-    return await _all(
-        "SELECT MAX(id) AS id, raw_text, kcal FROM meals WHERE raw_text != '' "
-        "GROUP BY lower(raw_text) ORDER BY id DESC LIMIT ?", limit)
+async def recent_food_names(limit: int = 60) -> list[str]:
+    """Названия продуктов из последних записей, свежие первыми, без повторов."""
+    rows = await _all("SELECT name FROM meal_items WHERE grams > 0 AND name != '' "
+                      "GROUP BY name ORDER BY MAX(id) DESC LIMIT ?", limit)
+    return [r["name"] for r in rows]
 
 
 async def day_totals(day: str) -> dict:
@@ -553,6 +555,18 @@ async def mark_sent(flag: str, day: str | None = None) -> bool:
     flags.add(flag)
     await set_day_state(day, sent=",".join(sorted(flags)))
     return True
+
+
+async def save_measure(day: str, key: str, value: float) -> None:
+    await _exec("INSERT OR REPLACE INTO measurements VALUES (?, ?, ?)", day, key, value)
+
+
+async def measure_sessions() -> list[tuple[str, dict]]:
+    """Замеры по дням, по возрастанию даты: [(дата, {ключ: значение})]."""
+    out: dict[str, dict] = {}
+    for r in await _all("SELECT date, key, value FROM measurements ORDER BY date"):
+        out.setdefault(r["date"], {})[r["key"]] = r["value"]
+    return list(out.items())
 
 
 async def get_flag(name: str) -> str | None:

@@ -42,7 +42,7 @@ def report_menu(current: str, extra: list[list[tuple[str, str]]] = ()) -> Inline
     row = [(("• " + t) if d == current else t, d) for t, d in PERIODS]
     return ikb(*extra, row)
 
-weight_menu = ikb([("📈 Прогресс", "r:0"), ("↩️ Отменить сегодняшний", "w:undo")])
+weight_menu = ikb([("📈 Прогресс", "r:0"), ("📏 Замеры", "s:measure")], [("↩️ Отменить сегодняшний", "w:undo")])
 
 weight_remind = ikb([("⏰ Отложить на час", "w:snooze"), ("🚫 Сегодня пропускаю", "w:skip")])
 
@@ -50,7 +50,7 @@ weight_remind = ikb([("⏰ Отложить на час", "w:snooze"), ("🚫 С
 more_menu = ikb(
     [("🎯 Цель", "s:goal"), ("⏰ Напоминания", "s:remind")],
     [("🥗 Диета и протеин", "s:diet"), ("⌚ Polar", "s:polar")],
-    [("🛠 Сервис", "s:service")],
+    [("📏 Замеры", "s:measure"), ("🛠 Сервис", "s:service")],
 )
 
 service_menu = ikb(

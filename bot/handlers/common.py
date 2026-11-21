@@ -140,6 +140,8 @@ async def record_weight(message: Message, profile, value: float) -> None:
     from .polar import weight_hint
     await weight_hint(message.bot, profile)
     await ask_yesterday(message, profile)
+    from .body import offer
+    await offer(message)
 
 
 async def ask_yesterday(message: Message, profile) -> None:

@@ -1,19 +1,20 @@
-"""«Что съесть сейчас»: 3 варианта приёма пищи из базовых продуктов под остаток дня. Локально, без Claude.
+"""«Что съесть сейчас»: самый маленький приём пищи, который добирает белок и жиры. Локально, без Claude.
 
-Порядок важности: белок (до цели дня) → жиры (до нижней границы) → углеводы добирают оставшиеся калории.
-Калории одного приёма = остаток / число оставшихся приёмов по времени суток, но не больше 700:
-большой запас вечером не превращается в ужин на 1000 ккал — недобор только увеличит дефицит.
+Задача — не съесть остаток калорий, а закрыть минимум белка (и нижнюю границу жиров) с наименьшими
+калориями: всё недоеденное уходит в дефицит. Углеводы и гарнир — только там, где без них блюда нет
+(бутерброд), овощи — фиксированная порция. Белок за день делится между оставшимися приёмами.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from html import escape
 
 from .. import db
 from . import base_foods, budget, nutrition
 
-MEAL_CAP = 700        # больше за один приём не предлагаем
-MIN_MEAL = 120        # меньше — только «если голодно» из овощей и кефира
+MEAL_CAP = 700        # больше за один приём не предлагаем, даже если так выходит по белку
+MIN_MEAL = 80         # остаток меньше — только «если голодно» из овощей
 FAT_PER_KG = 0.6      # нижняя граница жиров, г на кг целевого веса
 
 BY_NAME = {b.name: (i, b) for i, b in enumerate(base_foods.FOODS)}
@@ -82,9 +83,10 @@ DISHES: list[Dish] = [
 
 
 def title(dish: Dish, items: list[dict]) -> str:
-    if dish.fixed:
-        return dish.fixed
     have = {x["name"] for x in items}
+    if dish.fixed:
+        gone = [p.food for p in dish.parts if p.role in ("c", "f") and p.food not in have]
+        return dish.fixed + (" — без " + ", ".join(gone) if gone else "")
     words = [p.ins for p in dish.parts if p.ins and p.food100.name in have]
     if not words:
         return dish.base
@@ -99,13 +101,12 @@ def title(dish: Dish, items: list[dict]) -> str:
 class Need:
     left: float          # ккал до конца дня
     meals_left: int
-    kcal: float          # на этот приём
-    protein: float       # белка на этот приём (до цели дня)
+    kcal: float          # потолок на этот приём: остаток, но не больше MEAL_CAP
+    protein: float       # белка на этот приём (минимум дня поровну между оставшимися приёмами)
     fat: float           # жиров на этот приём (до нижней границы)
     p_min_gap: float     # сколько не хватает до минимума белка за день
     p_goal_gap: float
     fat_gap: float
-    capped: bool         # приём урезан до MEAL_CAP
 
 
 def fat_min(target_weight: float) -> int:
@@ -120,69 +121,48 @@ def need(profile, eaten: dict, allow: float, hour: int, meal_hours: list[int] = 
     """meal_hours — обычные часы приёмов пищи по записям (из разбора); без них — 3/2/1 по времени суток."""
     left = allow - eaten["kcal"]
     n = min(3, max(1, sum(1 for h in meal_hours if h >= hour))) if meal_hours else meals_left(hour)
-    share = left / n
     pmin, pgoal = nutrition.protein_min(profile["target_weight"]), profile["protein_goal"]
     p_min_gap = max(0.0, pmin - eaten["protein"])
     p_goal_gap = max(0.0, pgoal - eaten["protein"])
     fat_gap = max(0.0, fat_min(profile["target_weight"]) - eaten["fat"])
-    # белок: до цели поровну между приёмами, но до минимума — не меньше (в последний приём — весь)
-    protein = max(p_goal_gap / n, p_min_gap if n == 1 else p_min_gap / n)
-    return Need(left=left, meals_left=n, kcal=min(share, MEAL_CAP), protein=protein, fat=fat_gap / n,
-                p_min_gap=p_min_gap, p_goal_gap=p_goal_gap, fat_gap=fat_gap, capped=share > MEAL_CAP)
+    return Need(left=left, meals_left=n, kcal=min(max(left, 0), MEAL_CAP), protein=p_min_gap / n,
+                fat=fat_gap / n, p_min_gap=p_min_gap, p_goal_gap=p_goal_gap, fat_gap=fat_gap)
 
 
-def _snap(g: float, p: Part) -> float:
-    g = round(g / p.step) * p.step
-    if 0 < g < p.lo or (p.lo and g <= 0):
-        g = p.lo
-    return max(0.0, min(p.hi, g))
+def _up(g: float, p: Part) -> float:
+    """Порция не меньше нужной: вверх до шага, в пределах lo–hi."""
+    g = math.ceil(g / p.step - 1e-9) * p.step
+    return max(p.lo, min(p.hi, g))
 
 
 def fit(dish: Dish, nd: Need) -> tuple[float, list[dict]] | None:
-    """Граммовки блюда под приём: белок → жиры → углеводы на оставшиеся калории. (оценка, позиции) или None."""
-    grams: dict[int, float] = {}
+    """Наименьшие граммовки, закрывающие белок и жиры приёма. (оценка, позиции) или None."""
     per = {i: p.food100 for i, p in enumerate(dish.parts)}
+    grams = {i: p.lo for i, p in enumerate(dish.parts)}   # овощи, обязательная основа (хлеб в бутерброде)
 
-    def kcal_of(i, g):
-        return per[i].kcal * g / 100
+    def total(field):
+        return sum(per[i].__getattribute__(field) * g / 100 for i, g in grams.items())
 
-    for i, p in enumerate(dish.parts):  # овощи и обязательные минимумы
-        grams[i] = p.lo
-    for i, p in enumerate(dish.parts):  # белок
-        if p.role == "p" and per[i].protein:
-            want = nd.protein / (per[i].protein / 100)
-            grams[i] = _snap(want, p)
-    # белковая часть не должна съесть весь приём: оставляем место хотя бы овощам
-    used = sum(kcal_of(i, g) for i, g in grams.items())
-    for i, p in enumerate(dish.parts):
-        while p.role == "p" and used > nd.kcal and grams[i] - p.step >= p.lo:
-            grams[i] -= p.step
-            used -= kcal_of(i, p.step)
-    for i, p in enumerate(dish.parts):  # жиры — если не хватает и есть место
-        if p.role == "f" and p.hi > p.lo:
-            room = nd.kcal - sum(kcal_of(j, g) for j, g in grams.items())
-            want = min(nd.fat / (per[i].fat / 100), room / (per[i].kcal / 100)) if nd.fat > 0 else 0
-            grams[i] = _snap(max(want, 0), p) if want >= p.step / 2 or p.lo else p.lo
-    for i, p in enumerate(dish.parts):  # углеводы — на остаток калорий
-        if p.role == "c":
-            room = nd.kcal - sum(kcal_of(j, g) for j, g in grams.items() if j != i)
-            g = _snap(max(room, 0) / (per[i].kcal / 100), p)
-            while g > p.lo and kcal_of(i, g) > room + 25:
-                g -= p.step
-            grams[i] = max(g, p.lo)
-    for i, p in enumerate(dish.parts):
-        if p.lo == 0 and 0 < grams[i] < max(p.step, 0.3 * p.hi):
-            grams[i] = 0
+    pi = [i for i, p in enumerate(dish.parts) if p.role == "p" and per[i].protein]
+    if pi:                                   # весь недостающий белок — главной белковой частью
+        i = pi[0]
+        rest = nd.protein - (total("protein") - per[i].protein * grams[i] / 100)
+        grams[i] = _up(max(rest, 0) / (per[i].protein / 100), dish.parts[i])
+    for i, p in enumerate(dish.parts):       # жиры — только если не хватает
+        if p.role == "f" and p.hi > p.lo and per[i].fat:
+            short = nd.fat - total("fat")
+            if short >= 2:
+                grams[i] = _up(short / (per[i].fat / 100), p)
     items = [base_foods.item(per[i], g) | {"part": i} for i, g in grams.items() if g > 0]
     kcal = sum(x["kcal"] for x in items)
+    if kcal > nd.kcal + 30:
+        return None
     prot = sum(x["protein"] for x in items)
     fat = sum(x["fat"] for x in items)
-    if kcal > nd.kcal * 1.15 + 30:
-        return None
-    # оценка: белок важнее всего, потом попадание в калории приёма, потом жиры
-    score = 3 * (min(prot, nd.protein) / nd.protein if nd.protein else 1)
-    score -= abs(kcal - nd.kcal) / max(nd.kcal, 1)
-    score += 0.5 * (min(fat, nd.fat) / nd.fat if nd.fat else 0.5)
+    pcov = min(prot, nd.protein) / nd.protein if nd.protein else 1
+    fcov = min(fat, nd.fat) / nd.fat if nd.fat else 1
+    # закрыть белок важнее всего, потом жиры; из закрывающих — меньше калорий
+    score = 3 * pcov + 0.7 * fcov - kcal / 300
     return score, items
 
 
@@ -253,7 +233,8 @@ async def decode(data: str) -> tuple[str, list[dict]] | None:
         if int(k) >= len(dishes):
             return None
         dish = dishes[int(k)]
-        return dish.fixed, [base_foods.item(dish.parts[i].food100, g) for i, g in _pairs(rest)]
+        items = [base_foods.item(dish.parts[i].food100, g) for i, g in _pairs(rest)]
+        return title(dish, items), items
     _, k, rest = data.split(":", 2)
     items = [base_foods.item(base_foods.FOODS[i], g) for i, g in _pairs(rest)]
     return title(DISHES[int(k)], items), items
@@ -280,28 +261,34 @@ async def build(profile, offset: int = 0) -> tuple[str, list[tuple[str, str]]]:
     plan = await db.last_plan()
     nd = need(profile, eaten, allow, hour, (plan or {}).get("meal_hours", ()))
 
+    fat_ok = nd.fat_gap < 3
+    if nd.p_min_gap <= 0 and fat_ok:
+        lines = ["🍽 <b>Что съесть</b>", "✅ Белок и жиры на сегодня уже добраны — можно ничего не есть: "
+                 f"оставшиеся {fmt(max(nd.left, 0))} ккал уйдут в дефицит."]
+        if nd.p_goal_gap > 0:
+            lines.append(f"До цели по белку ещё {fmt(nd.p_goal_gap)} г — если хочется, кефир 250 мл "
+                         "(125 ккал, 7 г) или обезжиренный творог 100 г (85 ккал, 18 г).")
+        lines.append("Голодно — огурец или помидор, 20–30 ккал.")
+        return "\n".join(lines), []
     if nd.left < MIN_MEAL:
         head = ("Лимит на сегодня исчерпан" if nd.left <= 0 else f"Осталось всего {fmt(nd.left)} ккал") + \
-            ". Если голодно — огурец или помидор (20–30 ккал), кефир 250 мл — 125 ккал."
+            ". Если голодно — огурец или помидор (20–30 ккал)."
         if nd.p_min_gap > 0:
-            head += f"\nДо минимума белка не хватает {fmt(nd.p_min_gap)} г — кефир или обезжиренный творог 100 г (85 ккал, 18 г белка)."
+            head += f"\nДо минимума белка не хватает {fmt(nd.p_min_gap)} г — обезжиренный творог 100 г (85 ккал, 18 г белка)."
         return f"🍽 <b>Что съесть</b>\n{head}", []
 
-    lines = ["🍽 <b>Что съесть сейчас</b>"]
-    meals = {3: "≈ 3 приёма до вечера", 2: "≈ 2 приёма до вечера", 1: "последний приём"}[nd.meals_left]
-    if plan and plan.get("meal_hours"):
-        meals += " (ваш режим: " + ", ".join(f"{h}:00" for h in plan["meal_hours"]) + ")"
-    lines.append(f"Осталось {fmt(nd.left)} ккал · {meals} → на этот ~{fmt(nd.kcal)}")
+    lines = ["🍽 <b>Что съесть сейчас</b> — минимум, чтобы добрать белок"]
     lack = []
-    if nd.p_goal_gap > 0:
-        lack.append(f"белок {fmt(nd.p_goal_gap)} г до цели" + (f" (до мин {fmt(nd.p_min_gap)})" if nd.p_min_gap else ""))
-    if nd.fat_gap > 0:
-        lack.append(f"жиры {fmt(nd.fat_gap)} г до нормы")
-    lines.append("Не хватает: " + (", ".join(lack) if lack else "ничего — белок и жиры уже в норме, остаток — углеводы"))
+    if nd.p_min_gap > 0:
+        lack.append(f"белок {fmt(nd.p_min_gap)} г до минимума")
+    if not fat_ok:
+        lack.append(f"жиры {fmt(nd.fat_gap)} г")
+    meals = "сейчас — всё" if nd.meals_left == 1 else f"сейчас ≈ {fmt(nd.protein)} г белка ({nd.meals_left} приёма до вечера)"
+    if plan and plan.get("meal_hours") and nd.meals_left > 1:
+        meals += ", ваш режим: " + ", ".join(f"{h}:00" for h in plan["meal_hours"])
+    lines.append("Не хватает за день: " + ", ".join(lack) + f" · {meals}")
     if plan and plan.get("fixes"):
         lines.append(f"📌 На этой неделе: {escape(plan['fixes'][0]['short'])}")
-    if nd.capped:
-        lines.append(f"<i>Запас большой, но больше {MEAL_CAP} за раз не предлагаю: недобор просто увеличит дефицит.</i>")
 
     opts = options(nd, hour, plan)
     if not opts:
@@ -319,7 +306,8 @@ async def build(profile, offset: int = 0) -> tuple[str, list[tuple[str, str]]]:
         lines += ["", f"<b>{n}. {star}{escape(title(dish, items))}</b> — {fmt(kc)} ккал · Б {fmt(p)} · Ж {fmt(f)} · У {fmt(c)}",
                   "   " + escape(", ".join(_fmt_item(x) for x in items))]
         buttons.append((f"✅ Съел {n}", encode(k, dish, items)))
-    lines.append("\n<i>Порции подогнаны под остаток. Съели по-другому — просто напишите, как обычно.</i>")
+    lines.append(f"\n<i>Остаток дня {fmt(nd.left)} ккал — всё, что не съедите, идёт в дефицит. "
+                 "Съели по-другому — просто напишите, как обычно.</i>")
     if len(opts) > 3:
         buttons.append(("🔄 Другие", f"ws:more:{offset + 3}"))
     return "\n".join(lines), buttons

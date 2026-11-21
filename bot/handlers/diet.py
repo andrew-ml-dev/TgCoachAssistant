@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from .. import db, keyboards as kb
-from ..services import llm, products
+from ..services import foodbase, llm, products
 from ..services.budget import fmt
 from ..services.parser import normalize
 from . import common
@@ -168,36 +168,42 @@ async def save_product(message: Message, text: str) -> None:
         reply_markup=kb.ikb([(f"➕ Записать сейчас", f"pr:use:{pid}")]))
 
 
+QUICK_LIMIT = 14
+
+
+async def quick_products() -> list[dict]:
+    """Последние съеденные продукты из базы, без повторов, плюс закреплённые (этикетка, штрихкод)."""
+    rows = await db.foods()
+    idx = foodbase.index(rows)
+    out, seen = [], set()
+    for name in await db.recent_food_names():
+        p = foodbase.lookup(name, idx)
+        if p and p["id"] not in seen:
+            seen.add(p["id"])
+            out.append(p)
+        if len(out) >= QUICK_LIMIT:
+            break
+    out += [p for p in rows if p["pinned"] and p["id"] not in seen]
+    return out
+
+
 async def quick_screen(message: Message) -> None:
-    """«⚡ Быстрая запись»: продукты с этикеткой (выбрать → ввести вес) и повтор недавнего (одно нажатие)."""
-    prods = await db.products()
-    recent = await db.recent_meals(limit=6)
-    if not prods and not recent:
-        await message.answer(
-            "<b>⚡ Быстрая запись</b>\n"
-            "Здесь будут:\n"
-            "• 📦 ваши продукты с цифрами с этикетки — выбрать и ввести вес;\n"
-            "• 🕘 то, что вы уже записывали, — повтор в одно нажатие.\n\n"
-            "Пока пусто: запишите еду текстом или голосом, пришлите фото штрихкода или добавьте продукт с упаковки.",
-            reply_markup=kb.ikb([("🥚 Базовые продукты", "bf:list")],
-                                [("➕ Новый продукт", "pr:add"), ("🍽 По шагам", "st:go")],
-                                [("🏋️ Тренировка — калории с часов", "wo:ask")]))
-        return
-    rows = [[(f"📦 {p['name'][:30]} · {p['kcal']:g}/100 г", f"pr:use:{p['id']}")] for p in prods]
-    rows += [[(f"🕘 {m['raw_text'][:30]} · {fmt(m['kcal'])}", f"rep:{m['id']}")] for m in recent]
+    """«⚡ Быстрая запись»: последние продукты (цифры на 100 г уже известны) → выбрать → ввести граммы."""
+    prods = await quick_products()
+    rows = [[(f"{p['name'][:28]} · {p['kcal']:g} ккал · Б {p['protein']:g}", f"pr:use:{p['id']}")] for p in prods]
     rows.append([("🥚 Базовые продукты: яйца, творог, крупы…", "bf:list")])
     last = [("➕ Новый продукт", "pr:add"), ("🍽 По шагам", "st:go")]
-    if prods:
+    if await db.products():
         last.append(("🗑 Удалить продукт", "pr:manage"))
     rows.append(last)
     rows.append([("🏋️ Тренировка — калории с часов", "wo:ask")])
-    hint = []
     if prods:
-        hint.append("📦 — выбрать продукт и ввести вес")
-    if recent:
-        hint.append("🕘 — записать ещё раз как было")
-    hint.append("📷 фото штрихкода — найду продукт и запомню")
-    await message.answer("<b>⚡ Быстрая запись</b>\n" + "\n".join(hint), reply_markup=kb.ikb(*rows))
+        text = ("<b>⚡ Быстрая запись</b>\nВыберите продукт — останется ввести граммы. "
+                "Цифры на 100 г; свежие сверху.\n📷 фото штрихкода — найду продукт и запомню")
+    else:
+        text = ("<b>⚡ Быстрая запись</b>\nЗдесь будут продукты, которые вы ели: выбрать и ввести граммы.\n"
+                "Пока пусто: запишите еду текстом или голосом, пришлите фото штрихкода или добавьте продукт с упаковки.")
+    await message.answer(text, reply_markup=kb.ikb(*rows))
 
 
 async def products_screen(message: Message, manage: bool = False) -> None:
@@ -214,7 +220,7 @@ async def products_screen(message: Message, manage: bool = False) -> None:
 async def products_msg(message: Message, state: FSMContext) -> None:
     await state.clear()
     if message.text in kb.OLD_QUICK:
-        await message.answer("«Мои продукты» и «Повторить» объединены в «⚡ Быстрая запись».", reply_markup=kb.main_menu)
+        await message.answer("«Мои продукты» и «Повторить» объединены в «⚡ Быстрая запись» — там ваши последние продукты.", reply_markup=kb.main_menu)
     await quick_screen(message)
 
 
@@ -250,7 +256,8 @@ async def ask_grams(message: Message, state: FSMContext, p: dict, head: str = ""
     recent = [g for g in await db.recent_grams(p["name"]) if g != p.get("pack")]
     if recent:
         rows.append([(f"{g:g} г", f"pr:g:{p['id']}:{g:g}") for g in recent])
-    await message.answer(head + f"Сколько граммов «{escape(p['name'])}»? Отправьте число."
+    await message.answer(head + f"Сколько граммов «{escape(p['name'])}»? Отправьте число.\n"
+                         f"<i>на 100 г: {p['kcal']:g} ккал, Б {p['protein']:g} · Ж {p['fat']:g} · У {p['carbs']:g}</i>"
                          + (" Или выберите:" if rows else ""),
                          reply_markup=kb.ikb(*rows) if rows else None)
 
